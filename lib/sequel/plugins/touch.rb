@@ -22,13 +22,16 @@ module Sequel
     #   Sequel::Model.plugin :touch
     #
     #   # Allow touching of Album instances, with a custom column
-    #   Album.plugin :touch, column: :updated_on
+    #   Album.plugin :touch, :column=>:updated_on
     #
     #   # Allow touching of Artist instances, updating the albums and tags
     #   # associations when touching, touching the +updated_on+ column for
     #   # albums and the +updated_at+ column for tags
-    #   Artist.plugin :touch, associations: [{albums: :updated_on}, :tags]
+    #   Artist.plugin :touch, :associations=>[{:albums=>:updated_on}, :tags]
     module Touch
+      # The default column to update when touching
+      TOUCH_COLUMN_DEFAULT = :updated_at
+
       def self.apply(model, opts=OPTS)
         model.instance_variable_set(:@touched_associations, {})
       end
@@ -43,7 +46,7 @@ module Sequel
       #                  If a hash is used, the value is used as the column to update.
       # :column :: The column to modify when touching a model instance.
       def self.configure(model, opts=OPTS)
-        model.touch_column = opts[:column] || :updated_at if opts[:column] || !model.touch_column
+        model.touch_column = opts[:column] || TOUCH_COLUMN_DEFAULT if opts[:column] || !model.touch_column
         model.touch_associations(opts[:associations]) if opts[:associations]
       end
 
@@ -60,13 +63,6 @@ module Sequel
 
         Plugins.inherited_instance_variables(self, :@touched_associations=>:dup, :@touch_column=>nil)
 
-        # Freeze the touched associations when freezing the model class.
-        def freeze
-          @touched_associations.freeze
-
-          super
-        end
-
         # Add additional associations to be touched.  See the :association option
         # of the Sequel::Plugin::Touch.configure method for the format of the associations
         # arguments.
@@ -82,12 +78,6 @@ module Sequel
       end
 
       module InstanceMethods
-        # Touch all of the model's touched_associations when creating the object.
-        def after_create
-          super
-          touch_associations
-        end
-
         # Touch all of the model's touched_associations when destroying the object.
         def after_destroy
           super
@@ -127,17 +117,16 @@ module Sequel
           model.touched_associations.each do |assoc, column|
             r = model.association_reflection(assoc)
             next unless r.can_have_associated_objects?(self)
-            ds = public_send(r[:dataset_method])
+            ds = send(r.dataset_method)
 
             if ds.send(:joined_dataset?)
               # Can't update all values at once, so update each instance individually.
               # Instead if doing a simple save, update via the instance's dataset,
               # to avoid going into an infinite loop in some cases.
-              public_send(assoc).each{|x| x.this.update(column=>touch_association_value)}
+              send(r[:name]).each{|x| x.this.update(column=>touch_association_value)}
             else
               # Update all values at once for performance reasons.
               ds.update(column=>touch_association_value)
-              associations.delete(assoc)
             end
           end
         end

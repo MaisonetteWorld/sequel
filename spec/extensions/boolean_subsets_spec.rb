@@ -1,8 +1,8 @@
-require_relative "spec_helper"
+require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
 
 describe "boolean_subsets plugin" do
   before do
-    @db = Sequel.mock
+    @db = Sequel::Database.new
     def @db.supports_schema_parsing?() true end
     def @db.schema(*args)
       [[:asdaf9898as, {}], [:active, {:type=>:boolean}]]
@@ -40,7 +40,7 @@ describe "boolean_subsets plugin" do
   end
 
   it "should handle cases where getting the columns raises an error" do
-    def @c.columns; raise Sequel::Error end
+    @c.meta_def(:columns){raise Sequel::Error}
     @c.plugin(:boolean_subsets)
     @c.respond_to?(:active).must_equal false
   end

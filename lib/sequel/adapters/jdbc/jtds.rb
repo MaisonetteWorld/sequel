@@ -1,21 +1,24 @@
 # frozen-string-literal: true
 
 Sequel::JDBC.load_driver('Java::net.sourceforge.jtds.jdbc.Driver', :JTDS)
-require_relative 'mssql'
+Sequel.require 'adapters/jdbc/mssql'
 
 module Sequel
   module JDBC
     Sequel.synchronize do
       DATABASE_SETUP[:jtds] = proc do |db|
         db.extend(Sequel::JDBC::JTDS::DatabaseMethods)
-        db.extend_datasets Sequel::MSSQL::DatasetMethods
+        db.dataset_class = Sequel::JDBC::JTDS::Dataset
         db.send(:set_mssql_unicode_strings)
         Java::net.sourceforge.jtds.jdbc.Driver
       end
     end
 
+    # Database and Dataset instance methods for JTDS specific
+    # support via JDBC.
     module JTDS
       module DatabaseMethods
+        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::JDBC::MSSQL::DatabaseMethods
 
         private
@@ -33,6 +36,11 @@ module Sequel
         def set_ps_arg_nil(cps, i)
           cps.setNull(i, cps.getParameterMetaData.getParameterType(i))
         end
+      end
+
+      # Dataset class for JTDS datasets accessed via JDBC.
+      class Dataset < JDBC::Dataset
+        include Sequel::MSSQL::DatasetMethods
       end
     end
   end

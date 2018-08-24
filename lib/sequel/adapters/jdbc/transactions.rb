@@ -3,10 +3,12 @@
 module Sequel
   module JDBC
     module Transactions
-      def freeze
-        supports_savepoints?
-        super
-      end
+      TRANSACTION_BEGIN = 'Transaction.begin'.freeze
+      TRANSACTION_COMMIT = 'Transaction.commit'.freeze
+      TRANSACTION_RELEASE_SP = 'Transaction.release_savepoint'.freeze
+      TRANSACTION_ROLLBACK = 'Transaction.rollback'.freeze
+      TRANSACTION_ROLLBACK_SP = 'Transaction.rollback_savepoint'.freeze
+      TRANSACTION_SAVEPOINT= 'Transaction.savepoint'.freeze
 
       # Check the JDBC DatabaseMetaData for savepoint support
       def supports_savepoints?
@@ -25,7 +27,7 @@ module Sequel
       JDBC_TRANSACTION_ISOLATION_LEVELS = {:uncommitted=>JavaSQL::Connection::TRANSACTION_READ_UNCOMMITTED,
         :committed=>JavaSQL::Connection::TRANSACTION_READ_COMMITTED,
         :repeatable=>JavaSQL::Connection::TRANSACTION_REPEATABLE_READ,
-        :serializable=>JavaSQL::Connection::TRANSACTION_SERIALIZABLE}.freeze
+        :serializable=>JavaSQL::Connection::TRANSACTION_SERIALIZABLE}
 
       # Set the transaction isolation level on the given connection using
       # the JDBC API.
@@ -34,7 +36,7 @@ module Sequel
         if (jdbc_level = JDBC_TRANSACTION_ISOLATION_LEVELS[level]) &&
             conn.getMetaData.supportsTransactionIsolationLevel(jdbc_level)
           _trans(conn)[:original_jdbc_isolation_level] = conn.getTransactionIsolation
-          log_connection_yield("Transaction.isolation_level = #{level}", conn){conn.setTransactionIsolation(jdbc_level)}
+          log_yield("Transaction.isolation_level = #{level}"){conn.setTransactionIsolation(jdbc_level)}
         end
       end
 
@@ -48,14 +50,14 @@ module Sequel
         if supports_savepoints?
           th = _trans(conn)
           if sps = th[:savepoint_objs]
-            sps << log_connection_yield('Transaction.savepoint', conn){conn.set_savepoint}
+            sps << log_yield(TRANSACTION_SAVEPOINT){conn.set_savepoint}
           else
-            log_connection_yield('Transaction.begin', conn){conn.setAutoCommit(false)}
+            log_yield(TRANSACTION_BEGIN){conn.setAutoCommit(false)}
             th[:savepoint_objs] = []
             set_transaction_isolation(conn, opts)
           end
         else
-          log_connection_yield('Transaction.begin', conn){conn.setAutoCommit(false)}
+          log_yield(TRANSACTION_BEGIN){conn.setAutoCommit(false)}
           set_transaction_isolation(conn, opts)
         end
       end
@@ -65,12 +67,12 @@ module Sequel
         if supports_savepoints?
           sps = _trans(conn)[:savepoint_objs]
           if sps.empty?
-            log_connection_yield('Transaction.commit', conn){conn.commit}
+            log_yield(TRANSACTION_COMMIT){conn.commit}
           elsif supports_releasing_savepoints?
-            log_connection_yield('Transaction.release_savepoint', conn){supports_releasing_savepoints? ? conn.release_savepoint(sps.last) : sps.last}
+            log_yield(TRANSACTION_RELEASE_SP){supports_releasing_savepoints? ? conn.release_savepoint(sps.last) : sps.last}
           end
         else
-          log_connection_yield('Transaction.commit', conn){conn.commit}
+          log_yield(TRANSACTION_COMMIT){conn.commit}
         end
       end
       
@@ -95,12 +97,12 @@ module Sequel
         if supports_savepoints?
           sps = _trans(conn)[:savepoint_objs]
           if sps.empty?
-            log_connection_yield('Transaction.rollback', conn){conn.rollback}
+            log_yield(TRANSACTION_ROLLBACK){conn.rollback}
           else
-            log_connection_yield('Transaction.rollback_savepoint', conn){conn.rollback(sps.last)}
+            log_yield(TRANSACTION_ROLLBACK_SP){conn.rollback(sps.last)}
           end
         else
-          log_connection_yield('Transaction.rollback', conn){conn.rollback}
+          log_yield(TRANSACTION_ROLLBACK){conn.rollback}
         end
       end
     end

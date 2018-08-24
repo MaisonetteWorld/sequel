@@ -1,26 +1,23 @@
 # frozen-string-literal: true
 
-require_relative '../utils/replace'
-require_relative '../utils/split_alter_table'
-require_relative '../utils/unmodified_identifiers'
+Sequel.require 'adapters/utils/split_alter_table'
+Sequel.require 'adapters/utils/replace'
 
 module Sequel
+  Dataset::NON_SQL_OPTIONS << :insert_ignore
+  Dataset::NON_SQL_OPTIONS << :update_ignore
+  Dataset::NON_SQL_OPTIONS << :on_duplicate_key_update
+
   module MySQL
-    Sequel::Database.set_shared_adapter_scheme(:mysql, self)
+    @convert_tinyint_to_bool = true
 
-    def self.mock_adapter_setup(db)
-      db.instance_exec do
-        @server_version = 50617
-      end
-    end
+    class << self
+      # Sequel converts the column type tinyint(1) to a boolean by default when
+      # using the native MySQL or Mysql2 adapter.  You can turn off the conversion by setting
+      # this to false. This setting is ignored when connecting to MySQL via the do or jdbc
+      # adapters, both of which automatically do the conversion.
+      attr_accessor :convert_tinyint_to_bool
 
-    module DatabaseMethods
-      include UnmodifiedIdentifiers::DatabaseMethods
-      include Sequel::Database::SplitAlterTable
-
-      CAST_TYPES = {String=>:CHAR, Integer=>:SIGNED, Time=>:DATETIME, DateTime=>:DATETIME, Numeric=>:DECIMAL, BigDecimal=>:DECIMAL, File=>:BINARY}.freeze
-      COLUMN_DEFINITION_ORDER = [:generated, :collate, :null, :default, :unique, :primary_key, :auto_increment, :references].freeze
-      
       # Set the default charset used for CREATE TABLE.  You can pass the
       # :charset option to create_table to override this setting.
       attr_accessor :default_charset
@@ -32,17 +29,34 @@ module Sequel
       # Set the default engine used for CREATE TABLE.  You can pass the
       # :engine option to create_table to override this setting.
       attr_accessor :default_engine
+    end
 
+    # Methods shared by Database instances that connect to MySQL,
+    # currently supported by the native and JDBC adapters.
+    module DatabaseMethods
+      extend Sequel::Database::ResetIdentifierMangling
+
+      AUTO_INCREMENT = 'AUTO_INCREMENT'.freeze
+      CAST_TYPES = {String=>:CHAR, Integer=>:SIGNED, Time=>:DATETIME, DateTime=>:DATETIME, Numeric=>:DECIMAL, BigDecimal=>:DECIMAL, File=>:BINARY}
+      COLUMN_DEFINITION_ORDER = [:collate, :null, :default, :unique, :primary_key, :auto_increment, :references]
+      PRIMARY = 'PRIMARY'.freeze
+      MYSQL_TIMESTAMP_RE = /\ACURRENT_(?:DATE|TIMESTAMP)?\z/
+
+      include Sequel::Database::SplitAlterTable
+      
       # MySQL's cast rules are restrictive in that you can't just cast to any possible
       # database type.
       def cast_type_literal(type)
         CAST_TYPES[type] || super
       end
 
+      # Commit an existing prepared transaction with the given transaction
+      # identifier string.
       def commit_prepared_transaction(transaction_id, opts=OPTS)
         run("XA COMMIT #{literal(transaction_id)}", opts)
       end
 
+      # MySQL uses the :mysql database type
       def database_type
         :mysql
       end
@@ -54,12 +68,11 @@ module Sequel
         m = output_identifier_meth
         im = input_identifier_meth
         ds = metadata_dataset.
-          from(Sequel[:INFORMATION_SCHEMA][:KEY_COLUMN_USAGE]).
+          from(:INFORMATION_SCHEMA__KEY_COLUMN_USAGE).
           where(:TABLE_NAME=>im.call(table), :TABLE_SCHEMA=>Sequel.function(:DATABASE)).
           exclude(:CONSTRAINT_NAME=>'PRIMARY').
           exclude(:REFERENCED_TABLE_NAME=>nil).
-          order(:CONSTRAINT_NAME, :POSITION_IN_UNIQUE_CONSTRAINT).
-          select(Sequel[:CONSTRAINT_NAME].as(:name), Sequel[:COLUMN_NAME].as(:column), Sequel[:REFERENCED_TABLE_NAME].as(:table), Sequel[:REFERENCED_COLUMN_NAME].as(:key))
+          select(:CONSTRAINT_NAME___name, :COLUMN_NAME___column, :REFERENCED_TABLE_NAME___table, :REFERENCED_COLUMN_NAME___key)
         
         h = {}
         ds.each do |row|
@@ -71,13 +84,6 @@ module Sequel
           end
         end
         h.values
-      end
-
-      def freeze
-        server_version
-        mariadb?
-        supports_timestamp_usecs?
-        super
       end
 
       # MySQL namespaces indexes per table.
@@ -94,18 +100,10 @@ module Sequel
         indexes = {}
         remove_indexes = []
         m = output_identifier_meth
-        schema, table = schema_and_table(table)
-
-        table = Sequel::SQL::Identifier.new(table)
-        sql = "SHOW INDEX FROM #{literal(table)}"
-        if schema
-          schema = Sequel::SQL::Identifier.new(schema)
-          sql += " FROM #{literal(schema)}"
-        end
-
-        metadata_dataset.with_sql(sql).each do |r|
+        im = input_identifier_meth
+        metadata_dataset.with_sql("SHOW INDEX FROM ?", SQL::Identifier.new(im.call(table))).each do |r|
           name = r[:Key_name]
-          next if name == 'PRIMARY'
+          next if name == PRIMARY
           name = m.call(name)
           remove_indexes << name if r[:Sub_part] && ! opts[:partial]
           i = indexes[name] ||= {:columns=>[], :unique=>r[:Non_unique] != 1}
@@ -114,20 +112,16 @@ module Sequel
         indexes.reject{|k,v| remove_indexes.include?(k)}
       end
 
+      # Rollback an existing prepared transaction with the given transaction
+      # identifier string.
       def rollback_prepared_transaction(transaction_id, opts=OPTS)
         run("XA ROLLBACK #{literal(transaction_id)}", opts)
-      end
-
-      # Whether the database is MariaDB and not MySQL
-      def mariadb?
-        return @is_mariadb if defined?(@is_mariadb)
-        @is_mariadb = !(fetch('SELECT version()').single_value! !~ /mariadb/i)
       end
 
       # Get version of MySQL server, used for determined capabilities.
       def server_version
         @server_version ||= begin
-          m = /(\d+)\.(\d+)\.(\d+)/.match(fetch('SELECT version()').single_value!)
+          m = /(\d+)\.(\d+)\.(\d+)/.match(get(SQL::Function.new(:version)))
           (m[1].to_i * 10000) + (m[2].to_i * 100) + m[3].to_i
         end
       end
@@ -137,11 +131,6 @@ module Sequel
         true
       end
       
-      # Generated columns are supported in MariaDB 5.2.0+ and MySQL 5.7.6+.
-      def supports_generated_columns?
-        server_version >= (mariadb? ? 50200 : 50706)
-      end
-
       # MySQL 5+ supports prepared transactions (two-phase commit) using XA
       def supports_prepared_transactions?
         server_version >= 50000
@@ -163,8 +152,7 @@ module Sequel
       # automatic initialization of datetime values wasn't supported to 5.6.5+,
       # and this is related to that.
       def supports_timestamp_usecs?
-        return @supports_timestamp_usecs if defined?(@supports_timestamp_usecs)
-        @supports_timestamp_usecs = server_version >= 50605 && typecast_value_boolean(opts[:fractional_seconds])
+        @supports_timestamp_usecs ||= server_version >= 50605 && typecast_value_boolean(opts[:fractional_seconds])
       end
 
       # MySQL supports transaction isolation levels
@@ -180,6 +168,15 @@ module Sequel
         full_tables('BASE TABLE', opts)
       end
       
+      # Changes the database in use by issuing a USE statement.  I would be
+      # very careful if I used this.
+      def use(db_name)
+        disconnect
+        @opts[:database] = db_name if self << "USE #{db_name}"
+        @schemas = {}
+        self
+      end
+      
       # Return an array of symbols specifying view names in the current database.
       #
       # Options:
@@ -191,22 +188,17 @@ module Sequel
       private
       
       def alter_table_add_column_sql(table, op)
-        pos = if after_col = op[:after]
-          " AFTER #{quote_identifier(after_col)}"
-        elsif op[:first]
-          " FIRST"
-        end
-
-        sql = if related = op.delete(:table)
-          sql = super + "#{pos}, ADD "
+        if related = op.delete(:table)
+          sql = super.dup
           op[:table] = related
           op[:key] ||= primary_key_from_schema(related)
+          sql << ", ADD "
           if constraint_name = op.delete(:foreign_key_constraint_name)
             sql << "CONSTRAINT #{quote_identifier(constraint_name)} "
           end
           sql << "FOREIGN KEY (#{quote_identifier(op[:name])})#{column_references_sql(op)}"
         else
-          "#{super}#{pos}"
+          super
         end
       end
 
@@ -232,18 +224,7 @@ module Sequel
       alias alter_table_rename_column_sql alter_table_change_column_sql
       alias alter_table_set_column_type_sql alter_table_change_column_sql
       alias alter_table_set_column_null_sql alter_table_change_column_sql
-
-      def alter_table_set_column_default_sql(table, op)
-        return super unless op[:default].nil?
-
-        opts = schema(table).find{|x| x[0] == op[:name]}
-
-        if opts && opts[1][:allow_null] == false
-          "ALTER COLUMN #{quote_identifier(op[:name])} DROP DEFAULT"
-        else
-          super
-        end
-      end
+      alias alter_table_set_column_default_sql alter_table_change_column_sql
 
       def alter_table_add_constraint_sql(table, op)
         if op[:type] == :foreign_key
@@ -261,13 +242,10 @@ module Sequel
           "DROP FOREIGN KEY #{quote_identifier(name)}"
         when :unique
           "DROP INDEX #{quote_identifier(op[:name])}"
-        when :check, nil 
-          if supports_check_constraints?
-            "DROP CONSTRAINT #{quote_identifier(op[:name])}"
-          end
         end
       end
 
+      # MySQL server requires table names when dropping indexes.
       def alter_table_sql(table, op)
         case op[:op]
         when :drop_index
@@ -287,15 +265,10 @@ module Sequel
       # Handle MySQL specific default format.
       def column_schema_normalize_default(default, type)
         if column_schema_default_string_type?(type)
-          return if [:date, :datetime, :time].include?(type) && /\ACURRENT_(?:DATE|TIMESTAMP)?\z/.match(default)
+          return if [:date, :datetime, :time].include?(type) && MYSQL_TIMESTAMP_RE.match(default)
           default = "'#{default.gsub("'", "''").gsub('\\', '\\\\')}'"
         end
         super(default, type)
-      end
-
-      def column_schema_to_ruby_default(default, type)
-        return Sequel::CURRENT_DATE if mariadb? && server_version >= 100200 && default == 'curdate()'
-        super
       end
 
       # Don't allow combining adding foreign key operations with other
@@ -327,8 +300,9 @@ module Sequel
         sqls
       end
       
+      # Use MySQL specific AUTO_INCREMENT text.
       def auto_increment_sql
-        'AUTO_INCREMENT'
+        AUTO_INCREMENT
       end
       
       # MySQL needs to set transaction isolation before begining a transaction
@@ -347,23 +321,7 @@ module Sequel
         end
       end
 
-      # Add generation clause SQL fragment to column creation SQL.
-      def column_definition_generated_sql(sql, column)
-        if (generated_expression = column[:generated_always_as])
-          sql << " GENERATED ALWAYS AS (#{literal(generated_expression)})"
-          case (type = column[:generated_type])
-          when nil
-            # none, database default
-          when :virtual
-            sql << " VIRTUAL"
-          when :stored
-            sql << (mariadb? ? " PERSISTENT" : " STORED")
-          else
-            raise Error, "unsupported :generated_type option: #{type.inspect}"
-          end
-        end
-      end
-
+      # The order of the column definition, as an array of symbols.
       def column_definition_order
         COLUMN_DEFINITION_ORDER
       end
@@ -388,9 +346,9 @@ module Sequel
 
       # Use MySQL specific syntax for engine type and character encoding
       def create_table_sql(name, generator, options = OPTS)
-        engine = options.fetch(:engine, default_engine)
-        charset = options.fetch(:charset, default_charset)
-        collate = options.fetch(:collate, default_collate)
+        engine = options.fetch(:engine, Sequel::MySQL.default_engine)
+        charset = options.fetch(:charset, Sequel::MySQL.default_charset)
+        collate = options.fetch(:collate, Sequel::MySQL.default_collate)
         generator.constraints.sort_by{|c| (c[:type] == :primary_key) ? -1 : 1}
 
         # Proc for figuring out the primary key for a given table.
@@ -440,8 +398,6 @@ module Sequel
         /foreign key constraint fails/ => ForeignKeyConstraintViolation,
         /cannot be null/ => NotNullConstraintViolation,
         /Deadlock found when trying to get lock; try restarting transaction/ => SerializationFailure,
-        /CONSTRAINT .+ failed for/ => CheckConstraintViolation,
-        /\A(Statement aborted because lock\(s\) could not be acquired immediately and NOWAIT is set\.|Lock wait timeout exceeded; try restarting transaction)/ => DatabaseLockTimeout,
       }.freeze
       def database_error_regexps
         DATABASE_ERROR_REGEXPS
@@ -453,6 +409,17 @@ module Sequel
         metadata_dataset.with_sql('SHOW FULL TABLES').server(opts[:server]).map{|r| m.call(r.values.first) if r.delete(:Table_type) == type}.compact
       end
 
+      # MySQL folds unquoted identifiers to lowercase, so it shouldn't need to upcase identifiers on input.
+      def identifier_input_method_default
+        nil
+      end
+      
+      # MySQL folds unquoted identifiers to lowercase, so it shouldn't need to upcase identifiers on output.
+      def identifier_output_method_default
+        nil
+      end
+
+      # Handle MySQL specific index SQL syntax
       def index_definition_sql(table_name, index)
         index_name = quote_identifier(index[:name] || default_index_name(table_name, index[:columns]))
         raise Error, "Partial indexes are not supported for this database" if index[:where] && !supports_partial_indexes?
@@ -484,6 +451,7 @@ module Sequel
         end
       end
 
+      # Recognize MySQL set type.
       def schema_column_type(db_type)
         case db_type
         when /\Aset/io
@@ -506,11 +474,7 @@ module Sequel
         metadata_dataset.with_sql("DESCRIBE ?", table).map do |row|
           extra = row.delete(:Extra)
           if row[:primary_key] = row.delete(:Key) == 'PRI'
-            row[:auto_increment] = !!(extra.to_s =~ /auto_increment/i)
-          end
-          if supports_generated_columns?
-            # Extra field contains VIRTUAL or PERSISTENT for generated columns
-            row[:generated] = !!(extra.to_s =~ /VIRTUAL|STORED|PERSISTENT/i)
+            row[:auto_increment] = !!(extra.to_s =~ /auto_increment/io)
           end
           row[:allow_null] = row.delete(:Null) == 'YES'
           row[:default] = row.delete(:Default)
@@ -524,11 +488,6 @@ module Sequel
       # statement as dropping a related foreign key causes an error.
       def split_alter_table_op?(op)
         server_version >= 50600 && (op[:op] == :drop_index || (op[:op] == :drop_constraint && op[:type] == :unique))
-      end
-
-      # Whether the database supports CHECK constraints
-      def supports_check_constraints?
-        mariadb? && server_version >= 100200
       end
 
       # MySQL can combine multiple alter table ops into a single query.
@@ -576,11 +535,15 @@ module Sequel
 
       # MySQL has both datetime and timestamp classes, most people are going
       # to want datetime.
-      def type_literal_generic_only_time(column)
-        if supports_timestamp_usecs?
-          :'time(6)'
+      def type_literal_generic_time(column)
+        if column[:only_time]
+          if supports_timestamp_usecs?
+            :'time(6)'
+          else
+            :time
+          end
         else
-          :time
+          type_literal_generic_datetime(column)
         end
       end
 
@@ -597,57 +560,99 @@ module Sequel
   
     # Dataset methods shared by datasets that use MySQL databases.
     module DatasetMethods
-      MATCH_AGAINST = ["MATCH ".freeze, " AGAINST (".freeze, ")".freeze].freeze
-      MATCH_AGAINST_BOOLEAN = ["MATCH ".freeze, " AGAINST (".freeze, " IN BOOLEAN MODE)".freeze].freeze
+      BOOL_TRUE = '1'.freeze
+      BOOL_FALSE = '0'.freeze
+      COMMA_SEPARATOR = ', '.freeze
+      FOR_SHARE = ' LOCK IN SHARE MODE'.freeze
+      SQL_CALC_FOUND_ROWS = ' SQL_CALC_FOUND_ROWS'.freeze
+      APOS = Dataset::APOS
+      APOS_RE = Dataset::APOS_RE
+      DOUBLE_APOS = Dataset::DOUBLE_APOS
+      SPACE = Dataset::SPACE
+      PAREN_OPEN = Dataset::PAREN_OPEN
+      PAREN_CLOSE = Dataset::PAREN_CLOSE
+      NOT_SPACE = Dataset::NOT_SPACE
+      FROM = Dataset::FROM
+      COMMA = Dataset::COMMA
+      LIMIT = Dataset::LIMIT
+      GROUP_BY = Dataset::GROUP_BY
+      ESCAPE = Dataset::ESCAPE
+      BACKSLASH = Dataset::BACKSLASH
+      REGEXP = 'REGEXP'.freeze
+      LIKE = 'LIKE'.freeze
+      BINARY = 'BINARY '.freeze
+      CONCAT = "CONCAT".freeze
+      CAST_BITCOMP_OPEN = "CAST(~".freeze
+      CAST_BITCOMP_CLOSE = " AS SIGNED INTEGER)".freeze
+      STRAIGHT_JOIN = 'STRAIGHT_JOIN'.freeze
+      NATURAL_LEFT_JOIN = 'NATURAL LEFT JOIN'.freeze
+      BACKTICK = '`'.freeze
+      BACKTICK_RE = /`/.freeze
+      DOUBLE_BACKTICK = '``'.freeze
+      EMPTY_COLUMNS = " ()".freeze
+      EMPTY_VALUES = " VALUES ()".freeze
+      IGNORE = " IGNORE".freeze
+      ON_DUPLICATE_KEY_UPDATE = " ON DUPLICATE KEY UPDATE ".freeze
+      EQ_VALUES = '=VALUES('.freeze
+      EQ = '='.freeze
+      WITH_ROLLUP = ' WITH ROLLUP'.freeze
+      MATCH_AGAINST = ["(MATCH ".freeze, " AGAINST (".freeze, "))".freeze].freeze
+      MATCH_AGAINST_BOOLEAN = ["(MATCH ".freeze, " AGAINST (".freeze, " IN BOOLEAN MODE))".freeze].freeze
+      EXPLAIN = 'EXPLAIN '.freeze
+      EXPLAIN_EXTENDED = 'EXPLAIN EXTENDED '.freeze
+      BACKSLASH_RE = /\\/.freeze
+      QUAD_BACKSLASH = "\\\\\\\\".freeze
+      BLOB_START = "0x".freeze
+      EMPTY_BLOB = "''".freeze
+      HSTAR = "H*".freeze
+      CURRENT_TIMESTAMP_56 = 'CURRENT_TIMESTAMP(6)'.freeze
 
-      Dataset.def_sql_method(self, :delete, %w'with delete from where order limit')
+      # Comes directly from MySQL's documentation, used for queries with limits without offsets
+      ONLY_OFFSET = ",18446744073709551615".freeze
+
+      Dataset.def_sql_method(self, :delete, %w'delete from where order limit')
       Dataset.def_sql_method(self, :insert, %w'insert ignore into columns values on_duplicate_key_update')
-      Dataset.def_sql_method(self, :select, %w'with select distinct calc_found_rows columns from join where group having window compounds order limit lock')
-      Dataset.def_sql_method(self, :update, %w'with update ignore table set where order limit')
+      Dataset.def_sql_method(self, :select, %w'select distinct calc_found_rows columns from join where group having compounds order limit lock')
+      Dataset.def_sql_method(self, :update, %w'update ignore table set where order limit')
 
       include Sequel::Dataset::Replace
-      include UnmodifiedIdentifiers::DatasetMethods
 
+      # MySQL specific syntax for LIKE/REGEXP searches, as well as
+      # string concatenation.
       def complex_expression_sql_append(sql, op, args)
         case op
         when :IN, :"NOT IN"
-          ds = args[1]
+          ds = args.at(1)
           if ds.is_a?(Sequel::Dataset) && ds.opts[:limit]
-            super(sql, op, [args[0], ds.from_self])
+            super(sql, op, [args.at(0), ds.from_self])
           else
             super
           end
         when :~, :'!~', :'~*', :'!~*', :LIKE, :'NOT LIKE', :ILIKE, :'NOT ILIKE'
-          if !db.mariadb? && db.server_version >= 80000 && [:~, :'!~'].include?(op)
-            func = Sequel.function(:REGEXP_LIKE, args[0], args[1], 'c')
-            func = ~func if op == :'!~'
-            return literal_append(sql, func)
-          end
-
-          sql << '('
-          literal_append(sql, args[0])
-          sql << ' '
+          sql << PAREN_OPEN
+          literal_append(sql, args.at(0))
+          sql << SPACE
           sql << 'NOT ' if [:'NOT LIKE', :'NOT ILIKE', :'!~', :'!~*'].include?(op)
-          sql << ([:~, :'!~', :'~*', :'!~*'].include?(op) ? 'REGEXP' : 'LIKE')
-          sql << ' '
-          sql << 'BINARY ' if [:~, :'!~', :LIKE, :'NOT LIKE'].include?(op)
-          literal_append(sql, args[1])
+          sql << ([:~, :'!~', :'~*', :'!~*'].include?(op) ? REGEXP : LIKE)
+          sql << SPACE
+          sql << BINARY if [:~, :'!~', :LIKE, :'NOT LIKE'].include?(op)
+          literal_append(sql, args.at(1))
           if [:LIKE, :'NOT LIKE', :ILIKE, :'NOT ILIKE'].include?(op)
-            sql << " ESCAPE "
-            literal_append(sql, "\\")
+            sql << ESCAPE
+            literal_append(sql, BACKSLASH)
           end
-          sql << ')'
+          sql << PAREN_CLOSE
         when :'||'
           if args.length > 1
-            sql << "CONCAT"
+            sql << CONCAT
             array_sql_append(sql, args)
           else
-            literal_append(sql, args[0])
+            literal_append(sql, args.at(0))
           end
         when :'B~'
-          sql << "CAST(~"
-          literal_append(sql, args[0])
-          sql << " AS SIGNED INTEGER)"
+          sql << CAST_BITCOMP_OPEN
+          literal_append(sql, args.at(0))
+          sql << CAST_BITCOMP_CLOSE
         else
           super
         end
@@ -659,7 +664,7 @@ module Sequel
       # fractional seconds.
       def constant_sql_append(sql, constant)
         if constant == :CURRENT_TIMESTAMP && supports_timestamp_usecs?
-          sql << 'CURRENT_TIMESTAMP(6)'
+          sql << CURRENT_TIMESTAMP_56
         else
           super
         end
@@ -681,10 +686,10 @@ module Sequel
       # Sets up the select methods to delete from if deleting from a
       # joined dataset:
       #
-      #   DB[:a].join(:b, a_id: :id).delete
+      #   DB[:a].join(:b, :a_id=>:id).delete
       #   # DELETE a FROM a INNER JOIN b ON (b.a_id = a.id)
       #
-      #   DB[:a].join(:b, a_id: :id).delete_from(:a, :b).delete
+      #   DB[:a].join(:b, :a_id=>:id).delete_from(:a, :b).delete
       #   # DELETE a, b FROM a INNER JOIN b ON (b.a_id = a.id)
       def delete_from(*tables)
         clone(:delete_from=>tables)
@@ -696,7 +701,7 @@ module Sequel
         # Load the PrettyTable class, needed for explain output
         Sequel.extension(:_pretty_table) unless defined?(Sequel::PrettyTable)
 
-        ds = db.send(:metadata_dataset).with_sql(((opts[:extended] && (db.mariadb? || db.server_version < 50700)) ? 'EXPLAIN EXTENDED ' : 'EXPLAIN ') + select_sql).naked
+        ds = db.send(:metadata_dataset).with_sql((opts[:extended] ? EXPLAIN_EXTENDED : EXPLAIN) + select_sql).naked
         rows = ds.all
         Sequel::PrettyTable.string(rows, ds.columns)
       end
@@ -708,7 +713,7 @@ module Sequel
 
       # Adds full text filter
       def full_text_search(cols, terms, opts = OPTS)
-        where(full_text_sql(cols, terms, opts))
+        filter(full_text_sql(cols, terms, opts))
       end
       
       # MySQL specific full text search syntax.
@@ -717,10 +722,22 @@ module Sequel
         SQL::PlaceholderLiteralString.new((opts[:boolean] ? MATCH_AGAINST_BOOLEAN : MATCH_AGAINST), [Array(cols), terms])
       end
 
-      # Transforms :straight to STRAIGHT_JOIN.
+      # Transforms an CROSS JOIN to an INNER JOIN if the expr is not nil.
+      # Raises an error on use of :full_outer type, since MySQL doesn't support it.
+      def join_table(type, table, expr=nil, opts=OPTS, &block)
+        type = :inner if (type == :cross) && !expr.nil?
+        raise(Sequel::Error, "MySQL doesn't support FULL OUTER JOIN") if type == :full_outer
+        super(type, table, expr, opts, &block)
+      end
+      
+      # Transforms :natural_inner to NATURAL LEFT JOIN and straight to
+      # STRAIGHT_JOIN.
       def join_type_sql(join_type)
-        if join_type == :straight
-          'STRAIGHT_JOIN'
+        case join_type
+        when :straight
+          STRAIGHT_JOIN
+        when :natural_inner
+          NATURAL_LEFT_JOIN
         else
           super
         end
@@ -731,7 +748,7 @@ module Sequel
       # inserting rows that violate the unique key restriction.
       #
       #   dataset.insert_ignore.multi_insert(
-      #     [{name: 'a', value: 1}, {name: 'b', value: 2}]
+      #    [{:name => 'a', :value => 1}, {:name => 'b', :value => 2}]
       #   )
       #   # INSERT IGNORE INTO tablename (name, value) VALUES (a, 1), (b, 2)
       def insert_ignore
@@ -749,21 +766,21 @@ module Sequel
       # inserting rows that violate the unique key restriction.
       #
       #   dataset.on_duplicate_key_update.multi_insert(
-      #     [{name: 'a', value: 1}, {name: 'b', value: 2}]
+      #    [{:name => 'a', :value => 1}, {:name => 'b', :value => 2}]
       #   )
       #   # INSERT INTO tablename (name, value) VALUES (a, 1), (b, 2)
       #   # ON DUPLICATE KEY UPDATE name=VALUES(name), value=VALUES(value)
       #
       #   dataset.on_duplicate_key_update(:value).multi_insert(
-      #     [{name: 'a', value: 1}, {name: 'b', value: 2}]
+      #     [{:name => 'a', :value => 1}, {:name => 'b', :value => 2}]
       #   )
       #   # INSERT INTO tablename (name, value) VALUES (a, 1), (b, 2)
       #   # ON DUPLICATE KEY UPDATE value=VALUES(value)
       #
       #   dataset.on_duplicate_key_update(
-      #     value: Sequel.lit('value + VALUES(value)')
+      #     :value => Sequel.lit('value + VALUES(value)')
       #   ).multi_insert(
-      #     [{name: 'a', value: 1}, {name: 'b', value: 2}]
+      #     [{:name => 'a', :value => 1}, {:name => 'b', :value => 2}]
       #   )
       #   # INSERT INTO tablename (name, value) VALUES (a, 1), (b, 2)
       #   # ON DUPLICATE KEY UPDATE value=value + VALUES(value)
@@ -773,19 +790,7 @@ module Sequel
 
       # MySQL uses the nonstandard ` (backtick) for quoting identifiers.
       def quoted_identifier_append(sql, c)
-        sql << '`' << c.to_s.gsub('`', '``') << '`'
-      end
-
-      # MariaDB 10.2+ and MySQL 8+ support CTEs
-      def supports_cte?(type=:select)
-        if db.mariadb?
-          type == :select && db.server_version >= 100200
-        else
-          case type
-          when :select, :update, :delete
-            db.server_version >= 80000
-          end
-        end
+        sql << BACKTICK << c.to_s.gsub(BACKTICK_RE, DOUBLE_BACKTICK) << BACKTICK
       end
 
       # MySQL does not support derived column lists
@@ -804,9 +809,9 @@ module Sequel
         true
       end
 
-      # MariaDB 10.3+ supports INTERSECT or EXCEPT
+      # MySQL does not support INTERSECT or EXCEPT
       def supports_intersect_except?
-        db.mariadb? && db.server_version >= 100300
+        false
       end
       
       # MySQL does not support limits in correlated subqueries (or any subqueries that use IN).
@@ -819,13 +824,8 @@ module Sequel
         true
       end
 
-      # MySQL 8+ and MariaDB 10.3+ support NOWAIT.
-      def supports_nowait?
-        db.server_version >= (db.mariadb? ? 100300 : 80000)
-      end
-
       # MySQL's DISTINCT ON emulation using GROUP BY does not respect the
-      # query's ORDER BY clause.
+      # queries ORDER BY clause.
       def supports_ordered_distinct_on?
         false
       end
@@ -835,32 +835,18 @@ module Sequel
         true
       end
 
-      # MySQL 8+ supports SKIP LOCKED.
-      def supports_skip_locked?
-        !db.mariadb? && db.server_version >= 80000
-      end
-
-      # Check the database setting for whether fractional timestamps
-      # are suppported.
+      # MySQL does support fractional timestamps in literal timestamps, but it
+      # ignores them.  Also, using them seems to cause problems on 1.9.  Since
+      # they are ignored anyway, not using them is probably best.
       def supports_timestamp_usecs?
         db.supports_timestamp_usecs?
       end
-
-      # MySQL 8+ supports WINDOW clause.
-      def supports_window_clause?
-        !db.mariadb? && db.server_version >= 80000
-      end
-
-      # MariaDB 10.2+ and MySQL 8+ support window functions
-      def supports_window_functions?
-        db.server_version >= (db.mariadb? ? 100200 : 80000)
-      end
-
+      
       # Sets up the update methods to use UPDATE IGNORE.
       # Useful if you have a unique key and want to just skip
       # updating rows that violate the unique key restriction.
       #
-      #   dataset.update_ignore.update(name: 'a', value: 1)
+      #   dataset.update_ignore.update({:name => 'a', :value => 1})
       #   # UPDATE IGNORE tablename SET name = 'a', value = 1
       def update_ignore
         clone(:update_ignore=>true)
@@ -868,19 +854,14 @@ module Sequel
       
       private
 
-      # Allow update and delete for limited datasets, unless there is an offset.
-      def check_not_limited!(type)
-        super if type == :truncate || @opts[:offset]
-      end
-
       # Consider the first table in the joined dataset is the table to delete
       # from, but include the others for the purposes of selecting rows.
       def delete_from_sql(sql)
         if joined_dataset?
-          sql << ' '
+          sql << SPACE
           tables = @opts[:delete_from] || @opts[:from][0..0]
           source_list_append(sql, tables)
-          sql << ' FROM '
+          sql << FROM
           source_list_append(sql, @opts[:from])
           select_join_sql(sql)
         else
@@ -892,7 +873,7 @@ module Sequel
       def insert_columns_sql(sql)
         values = opts[:values]
         if values.is_a?(Array) && values.empty?
-          sql << " ()"
+          sql << EMPTY_COLUMNS
         else
           super
         end
@@ -900,12 +881,12 @@ module Sequel
 
       # MySQL supports INSERT IGNORE INTO
       def insert_ignore_sql(sql)
-        sql << " IGNORE" if opts[:insert_ignore]
+        sql << IGNORE if opts[:insert_ignore]
       end
 
       # MySQL supports UPDATE IGNORE
       def update_ignore_sql(sql)
-        sql << " IGNORE" if opts[:update_ignore]
+        sql << IGNORE if opts[:update_ignore]
       end
 
       # MySQL supports INSERT ... ON DUPLICATE KEY UPDATE
@@ -920,11 +901,11 @@ module Sequel
             update_cols = update_cols[0..-2]
           end
 
-          sql << " ON DUPLICATE KEY UPDATE "
+          sql << ON_DUPLICATE_KEY_UPDATE
           c = false
-          co = ', '
-          values = '=VALUES('
-          endp = ')'
+          co = COMMA
+          values = EQ_VALUES
+          endp = PAREN_CLOSE
           update_cols.each do |col|
             sql << co if c
             quote_identifier_append(sql, col)
@@ -934,7 +915,7 @@ module Sequel
             c ||= true
           end
           if update_vals
-            eq = '='
+            eq = EQ
             update_vals.map do |col,v| 
               sql << co if c
               quote_identifier_append(sql, col)
@@ -950,7 +931,7 @@ module Sequel
       def insert_values_sql(sql)
         values = opts[:values]
         if values.is_a?(Array) && values.empty?
-          sql << " VALUES ()"
+          sql << EMPTY_VALUES
         else
           super
         end
@@ -959,7 +940,7 @@ module Sequel
       # MySQL allows a LIMIT in DELETE and UPDATE statements.
       def limit_sql(sql)
         if l = @opts[:limit]
-          sql << " LIMIT "
+          sql << LIMIT
           literal_append(sql, l)
         end
       end
@@ -969,15 +950,15 @@ module Sequel
       # MySQL uses a preceding X for hex escaping strings
       def literal_blob_append(sql, v)
         if v.empty?
-          sql << "''"
+          sql << EMPTY_BLOB
         else
-          sql << "0x" << v.unpack("H*").first
+          sql << BLOB_START << v.unpack(HSTAR).first
         end
       end
 
       # Use 0 for false on MySQL
       def literal_false
-        '0'
+        BOOL_FALSE
       end
 
       # Raise error for infinitate and NaN values
@@ -991,60 +972,33 @@ module Sequel
 
       # SQL fragment for String.  Doubles \ and ' by default.
       def literal_string_append(sql, v)
-        sql << "'" << v.gsub("\\", "\\\\\\\\").gsub("'", "''") << "'"
+        sql << APOS << v.gsub(BACKSLASH_RE, QUAD_BACKSLASH).gsub(APOS_RE, DOUBLE_APOS) << APOS
       end
 
       # Use 1 for true on MySQL
       def literal_true
-        '1'
+        BOOL_TRUE
       end
       
-      # MySQL supports multiple rows in VALUES in INSERT.
+      # MySQL supports multiple rows in INSERT.
       def multi_insert_sql_strategy
         :values
       end
 
-      def non_sql_option?(key)
-        super || key == :insert_ignore || key == :update_ignore || key == :on_duplicate_key_update
-      end
-
       def select_only_offset_sql(sql)
-        sql << " LIMIT "
+        sql << LIMIT
         literal_append(sql, @opts[:offset])
-        sql << ",18446744073709551615"
+        sql << ONLY_OFFSET
       end
   
       # Support FOR SHARE locking when using the :share lock style.
-      # Use SKIP LOCKED if skipping locked rows.
       def select_lock_sql(sql)
-        lock = @opts[:lock]
-        if lock == :share
-          if !db.mariadb? && db.server_version >= 80000
-            sql << ' FOR SHARE'
-          else
-            sql << ' LOCK IN SHARE MODE'
-          end
-        else
-          super
-        end
-
-        if lock
-          if @opts[:skip_locked]
-            sql << " SKIP LOCKED"
-          elsif @opts[:nowait]
-            sql << " NOWAIT"
-          end
-        end
+        @opts[:lock] == :share ? (sql << FOR_SHARE) : super
       end
 
       # MySQL specific SQL_CALC_FOUND_ROWS option
       def select_calc_found_rows_sql(sql)
-        sql << ' SQL_CALC_FOUND_ROWS' if opts[:calc_found_rows]
-      end
-
-      # Use WITH RECURSIVE instead of WITH if any of the CTEs is recursive
-      def select_with_sql_base
-        opts[:with].any?{|w| w[:recursive]} ? "WITH RECURSIVE " : super
+        sql << SQL_CALC_FOUND_ROWS if opts[:calc_found_rows]
       end
 
       # MySQL uses WITH ROLLUP syntax.

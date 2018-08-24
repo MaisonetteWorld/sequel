@@ -1,4 +1,4 @@
-require_relative "spec_helper"
+require File.join(File.dirname(File.expand_path(__FILE__)), 'spec_helper')
 
 require 'stringio'
 Sequel.extension :pretty_table
@@ -23,7 +23,7 @@ describe "Dataset#print" do
   end
 
   it "should default to the dataset's columns" do
-    @dataset.columns(:a, :b)
+    @dataset.meta_def(:columns) {[:a, :b]}
     @dataset.print
     @output.rewind
     @output.read.must_equal \
@@ -60,23 +60,11 @@ describe "PrettyTable" do
   it "should infer the columns if not given" do
     Sequel::PrettyTable.print(@data1)
     @output.rewind
-    @output.read.must_equal(<<OUTPUT)
-+-+-+
-|x|y|
-+-+-+
-|3|4|
-+-+-+
-OUTPUT
+    @output.read.must_match(/\n(\|x\|y\|)|(\|y\|x\|)\n/)
   end
   
   it "should have #string return the string without printing" do
-    Sequel::PrettyTable.string(@data1).must_equal((<<OUTPUT).chomp)
-+-+-+
-|x|y|
-+-+-+
-|3|4|
-+-+-+
-OUTPUT
+    Sequel::PrettyTable.string(@data1).must_match(/\n(\|x\|y\|)|(\|y\|x\|)\n/)
     @output.rewind
     @output.read.must_equal ''
   end
@@ -84,40 +72,21 @@ OUTPUT
   it "should calculate the maximum width of each column correctly" do
     Sequel::PrettyTable.print(@data2, [:a, :b])
     @output.rewind
-    @output.read.must_equal(<<OUTPUT)
-+--+----+
-|a |b   |
-+--+----+
-|23|  45|
-|45|2377|
-+--+----+
-OUTPUT
+    @output.read.must_equal \
+      "+--+----+\n|a |b   |\n+--+----+\n|23|  45|\n|45|2377|\n+--+----+\n"
   end
 
   it "should also take header width into account" do
     Sequel::PrettyTable.print(@data3, [:aaa, :bb, :c])
     @output.rewind
-    @output.read.must_equal(<<OUTPUT)
-+---+--+---+
-|aaa|bb|c  |
-+---+--+---+
-|  1|  |   |
-|   | 2|   |
-|   |  |3.1|
-+---+--+---+
-OUTPUT
+    @output.read.must_equal \
+      "+---+--+---+\n|aaa|bb|c  |\n+---+--+---+\n|  1|  |   |\n|   | 2|   |\n|   |  |3.1|\n+---+--+---+\n"
   end
   
   it "should print only the specified columns" do
     Sequel::PrettyTable.print(@data2, [:a])
     @output.rewind
-    @output.read.must_equal(<<OUTPUT)
-+--+
-|a |
-+--+
-|23|
-|45|
-+--+
-OUTPUT
+    @output.read.must_equal \
+      "+--+\n|a |\n+--+\n|23|\n|45|\n+--+\n"
   end
 end

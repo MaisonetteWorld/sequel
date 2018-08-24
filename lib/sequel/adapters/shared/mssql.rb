@@ -1,19 +1,22 @@
 # frozen-string-literal: true
 
-require_relative '../utils/emulate_offset_with_row_number'
-require_relative '../utils/split_alter_table'
+Sequel.require %w'emulate_offset_with_row_number split_alter_table', 'adapters/utils'
 
 module Sequel
+  Dataset::NON_SQL_OPTIONS << :disable_insert_output
   module MSSQL
-    Sequel::Database.set_shared_adapter_scheme(:mssql, self)
-
-    def self.mock_adapter_setup(db)
-      db.instance_exec do
-        @server_version = 11000000
-      end
-    end
-
     module DatabaseMethods
+      extend Sequel::Database::ResetIdentifierMangling
+
+      AUTO_INCREMENT = 'IDENTITY(1,1)'.freeze
+      SERVER_VERSION_RE = /^(\d+)\.(\d+)\.(\d+)/.freeze
+      SERVER_VERSION_SQL = "SELECT CAST(SERVERPROPERTY('ProductVersion') AS varchar)".freeze
+      SQL_BEGIN = "BEGIN TRANSACTION".freeze
+      SQL_COMMIT = "COMMIT TRANSACTION".freeze
+      SQL_ROLLBACK = "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION".freeze
+      SQL_ROLLBACK_TO_SAVEPOINT = 'IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION autopoint_%d'.freeze
+      SQL_SAVEPOINT = 'SAVE TRANSACTION autopoint_%d'.freeze
+      MSSQL_DEFAULT_RE = /\A(?:\(N?('.*')\)|\(\((-?\d+(?:\.\d+)?)\)\))\z/
       FOREIGN_KEY_ACTION_MAP = {0 => :no_action, 1 => :cascade, 2 => :set_null, 3 => :set_default}.freeze
 
       include Sequel::Database::SplitAlterTable
@@ -22,7 +25,16 @@ module Sequel
       # strings.  True by default for compatibility, can be set to false for a possible
       # performance increase.  This sets the default for all datasets created from this
       # Database object.
-      attr_accessor :mssql_unicode_strings
+      attr_reader :mssql_unicode_strings
+
+      def mssql_unicode_strings=(v)
+        @mssql_unicode_strings = v
+        reset_default_dataset
+      end
+
+      # The types to check for 0 scale to transform :decimal types
+      # to :integer.
+      DECIMAL_TYPE_RE = /number|numeric|decimal/io
 
       # Execute the given stored procedure with the given name.
       #
@@ -42,11 +54,11 @@ module Sequel
       #
       # Examples:
       #
-      #     DB.call_mssql_sproc(:SequelTest, {args: ['input arg', :output]})
-      #     DB.call_mssql_sproc(:SequelTest, {args: ['input arg', [:output, 'int', 'varname']]})
+      #     DB.call_mssql_sproc(:SequelTest, {:args => ['input arg', :output]})
+      #     DB.call_mssql_sproc(:SequelTest, {:args => ['input arg', [:output, 'int', 'varname']]})
       #
       #     named params:
-      #     DB.call_mssql_sproc(:SequelTest, args: {
+      #     DB.call_mssql_sproc(:SequelTest, :args => {
       #       'input_arg1_name' => 'input arg1 value',
       #       'input_arg2_name' => 'input arg2 value',
       #       'output_arg_name' => [:output, 'int', 'varname']
@@ -65,7 +77,7 @@ module Sequel
           method = :each_with_index
         end
 
-        args.public_send(method) do |v, i|
+        args.send(method) do |v, i|
           if named_args
             k = v
             v, type, select = i
@@ -103,6 +115,7 @@ module Sequel
         ds.first
       end
 
+      # Microsoft SQL Server uses the :mssql type.
       def database_type
         :mssql
       end
@@ -120,22 +133,20 @@ module Sequel
         schema, table = schema_and_table(table)
         current_schema = m.call(get(Sequel.function('schema_name')))
         fk_action_map = FOREIGN_KEY_ACTION_MAP
-        fk = Sequel[:fk]
-        fkc = Sequel[:fkc]
         ds = metadata_dataset.from(Sequel.lit('[sys].[foreign_keys]').as(:fk)).
           join(Sequel.lit('[sys].[foreign_key_columns]').as(:fkc), :constraint_object_id => :object_id).
-          join(Sequel.lit('[sys].[all_columns]').as(:pc), :object_id => fkc[:parent_object_id],     :column_id => fkc[:parent_column_id]).
-          join(Sequel.lit('[sys].[all_columns]').as(:rc), :object_id => fkc[:referenced_object_id], :column_id => fkc[:referenced_column_id]).
-          where{{object_schema_name(fk[:parent_object_id]) => im.call(schema || current_schema)}}.
-          where{{object_name(fk[:parent_object_id]) => im.call(table)}}.
-          select{[fk[:name], 
-                  fk[:delete_referential_action], 
-                  fk[:update_referential_action], 
-                  pc[:name].as(:column), 
-                  rc[:name].as(:referenced_column), 
-                  object_schema_name(fk[:referenced_object_id]).as(:schema), 
-                  object_name(fk[:referenced_object_id]).as(:table)]}.
-          order(fk[:name], fkc[:constraint_column_id])
+          join(Sequel.lit('[sys].[all_columns]').as(:pc), :object_id => :fkc__parent_object_id,     :column_id => :fkc__parent_column_id).
+          join(Sequel.lit('[sys].[all_columns]').as(:rc), :object_id => :fkc__referenced_object_id, :column_id => :fkc__referenced_column_id).
+          where{{object_schema_name(:fk__parent_object_id) => im.call(schema || current_schema)}}.
+          where{{object_name(:fk__parent_object_id) => im.call(table)}}.
+          select{[:fk__name, 
+                  :fk__delete_referential_action, 
+                  :fk__update_referential_action, 
+                  :pc__name___column, 
+                  :rc__name___referenced_column, 
+                  object_schema_name(:fk__referenced_object_id).as(:schema), 
+                  object_name(:fk__referenced_object_id).as(:table)]}.
+          order(:fk__name, :fkc__constraint_column_id)
         h = {}
         ds.each do |row|
           if r = h[row[:name]]
@@ -155,29 +166,22 @@ module Sequel
         h.values
       end
 
-      def freeze
-        server_version
-        super
-      end
-
       # Use the system tables to get index information
       def indexes(table, opts=OPTS)
         m = output_identifier_meth
         im = input_identifier_meth
         indexes = {}
-        table = table.value if table.is_a?(Sequel::SQL::Identifier)
-        i = Sequel[:i]
         ds = metadata_dataset.from(Sequel.lit('[sys].[tables]').as(:t)).
          join(Sequel.lit('[sys].[indexes]').as(:i), :object_id=>:object_id).
          join(Sequel.lit('[sys].[index_columns]').as(:ic), :object_id=>:object_id, :index_id=>:index_id).
          join(Sequel.lit('[sys].[columns]').as(:c), :object_id=>:object_id, :column_id=>:column_id).
-         select(i[:name], i[:is_unique], Sequel[:c][:name].as(:column)).
-         where{{t[:name]=>im.call(table)}}.
-         where(i[:is_primary_key]=>0, i[:is_disabled]=>0).
-         order(i[:name], Sequel[:ic][:index_column_id])
+         select(:i__name, :i__is_unique, :c__name___column).
+         where{{t__name=>im.call(table)}}.
+         where(:i__is_primary_key=>0, :i__is_disabled=>0).
+         order(:i__name, :ic__index_column_id)
 
         if supports_partial_indexes?
-          ds = ds.where(i[:has_filter]=>0)
+          ds = ds.where(:i__has_filter=>0)
         end
 
         ds.each do |r|
@@ -198,7 +202,7 @@ module Sequel
           (conn.server_version rescue nil) if conn.respond_to?(:server_version)
         end
         unless @server_version
-          m = /^(\d+)\.(\d+)\.(\d+)/.match(fetch("SELECT CAST(SERVERPROPERTY('ProductVersion') AS varchar)").single_value.to_s)
+          m = SERVER_VERSION_RE.match(fetch(SERVER_VERSION_SQL).single_value.to_s)
           @server_version = (m[1].to_i * 1000000) + (m[2].to_i * 10000) + m[3].to_i
         end
         @server_version
@@ -209,7 +213,7 @@ module Sequel
         dataset.send(:is_2008_or_later?)
       end
 
-      # MSSQL supports savepoints, though it doesn't support releasing them
+      # MSSQL supports savepoints, though it doesn't support committing/releasing them savepoint
       def supports_savepoints?
         true
       end
@@ -248,9 +252,10 @@ module Sequel
 
       # MSSQL uses the IDENTITY(1,1) column for autoincrementing columns.
       def auto_increment_sql
-        'IDENTITY(1,1)'
+        AUTO_INCREMENT
       end
       
+      # MSSQL specific syntax for altering tables.
       def alter_table_sql(table, op)
         case op[:op]
         when :add_column
@@ -260,7 +265,7 @@ module Sequel
           add_drop_default_constraint_sql(sqls, table, op[:name])
           sqls << super
         when :rename_column
-          "sp_rename #{literal("#{quote_schema_table(table)}.#{quote_identifier(op[:name])}")}, #{literal(metadata_dataset.with_quote_identifiers(false).quote_identifier(op[:new_name]))}, 'COLUMN'"
+          "sp_rename #{literal("#{quote_schema_table(table)}.#{quote_identifier(op[:name])}")}, #{literal(op[:new_name].to_s)}, 'COLUMN'"
         when :set_column_type
           sqls = []
           if sch = schema(table)
@@ -278,8 +283,7 @@ module Sequel
         when :set_column_null
           sch = schema(table).find{|k,v| k.to_s == op[:name].to_s}.last
           type = sch[:db_type]
-          if [:string, :decimal].include?(sch[:type]) && !["text", "ntext"].include?(type) && (size = (sch[:max_chars] || sch[:column_size]))
-            size = "MAX" if size == -1
+          if [:string, :decimal].include?(sch[:type]) and size = (sch[:max_chars] || sch[:column_size])
             type += "(#{size}#{", #{sch[:scale]}" if sch[:scale] && sch[:scale].to_i > 0})"
           end
           "ALTER TABLE #{quote_schema_table(table)} ALTER COLUMN #{quote_identifier(op[:name])} #{type_literal(:type=>type)} #{'NOT ' unless op[:null]}NULL"
@@ -290,34 +294,33 @@ module Sequel
         end
       end
       
+      # SQL to start a new savepoint
       def begin_savepoint_sql(depth)
-        "SAVE TRANSACTION autopoint_#{depth}"
+        SQL_SAVEPOINT % depth
       end
 
+      # SQL to BEGIN a transaction.
       def begin_transaction_sql
-        "BEGIN TRANSACTION"
-      end
-
-      # MSSQL does not allow adding primary key constraints to NULLable columns.
-      def can_add_primary_key_constraint_on_nullable_columns?
-        false
+        SQL_BEGIN
       end
 
       # Handle MSSQL specific default format.
       def column_schema_normalize_default(default, type)
-        if m = /\A(?:\(N?('.*')\)|\(\((-?\d+(?:\.\d+)?)\)\))\z/.match(default)
+        if m = MSSQL_DEFAULT_RE.match(default)
           default = m[1] || m[2]
         end
         super(default, type)
       end
 
-      # Commit the active transaction on the connection, does not release savepoints.
+      # Commit the active transaction on the connection, does not commit/release
+      # savepoints.
       def commit_transaction(conn, opts=OPTS)
         log_connection_execute(conn, commit_transaction_sql) unless savepoint_level(conn) > 1
       end
 
+      # SQL to COMMIT a transaction.
       def commit_transaction_sql
-        "COMMIT TRANSACTION"
+        SQL_COMMIT
       end
         
       # MSSQL uses the name of the table to decide the difference between
@@ -337,12 +340,11 @@ module Sequel
       end
     
       DATABASE_ERROR_REGEXPS = {
-        /Violation of UNIQUE KEY constraint|(Violation of PRIMARY KEY constraint.+)?Cannot insert duplicate key/ => UniqueConstraintViolation,
+        /Violation of UNIQUE KEY constraint|Violation of PRIMARY KEY constraint.+Cannot insert duplicate key/ => UniqueConstraintViolation,
         /conflicted with the (FOREIGN KEY.*|REFERENCE) constraint/ => ForeignKeyConstraintViolation,
         /conflicted with the CHECK constraint/ => CheckConstraintViolation,
         /column does not allow nulls/ => NotNullConstraintViolation,
         /was deadlocked on lock resources with another process and has been chosen as the deadlock victim/ => SerializationFailure,
-        /Lock request time out period exceeded\./ => DatabaseLockTimeout,
       }.freeze
       def database_error_regexps
         DATABASE_ERROR_REGEXPS
@@ -354,16 +356,18 @@ module Sequel
       def default_constraint_name(table, column_name)
         if server_version >= 9000000
           table_name = schema_and_table(table).compact.join('.')
-          self[Sequel[:sys][:default_constraints]].
+          self[:sys__default_constraints].
             where{{:parent_object_id => Sequel::SQL::Function.new(:object_id, table_name), col_name(:parent_object_id, :parent_column_id) => column_name.to_s}}.
             get(:name)
         end
       end
 
+      # The SQL to drop an index for the table.
       def drop_index_sql(table, op)
         "DROP INDEX #{quote_identifier(op[:name] || default_index_name(table, op[:columns]))} ON #{quote_schema_table(table)}"
       end
       
+      # support for clustered index type
       def index_definition_sql(table_name, index)
         index_name = index[:name] || default_index_name(table_name, index[:columns])
         raise Error, "Partial indexes are not supported for this database" if index[:where] && !supports_partial_indexes?
@@ -377,15 +381,17 @@ module Sequel
       # Backbone of the tables and views support.
       def information_schema_tables(type, opts)
         m = output_identifier_meth
-        metadata_dataset.from(Sequel[:information_schema][:tables].as(:t)).
+        metadata_dataset.from(:information_schema__tables___t).
           select(:table_name).
-          where(:table_type=>type, :table_schema=>(opts[:schema]||'dbo').to_s).
+          filter(:table_type=>type, :table_schema=>(opts[:schema]||'dbo').to_s).
           map{|x| m.call(x[:table_name])}
       end
 
       # Always quote identifiers in the metadata_dataset, so schema parsing works.
-      def _metadata_dataset
-        super.with_quote_identifiers(true)
+      def metadata_dataset
+        ds = super
+        ds.quote_identifiers = true
+        ds
       end
       
       # Use sp_rename to rename the table
@@ -393,14 +399,17 @@ module Sequel
         "sp_rename #{literal(quote_schema_table(name))}, #{quote_identifier(schema_and_table(new_name).pop)}"
       end
       
+      # SQL to rollback to a savepoint
       def rollback_savepoint_sql(depth)
-        "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION autopoint_#{depth}"
+        SQL_ROLLBACK_TO_SAVEPOINT % depth
       end
       
+      # SQL to ROLLBACK a transaction.
       def rollback_transaction_sql
-        "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION"
+        SQL_ROLLBACK
       end
       
+      # The closest MSSQL equivalent of a boolean datatype is the bit type.
       def schema_column_type(db_type)
         case db_type
         when /\A(?:bit)\z/io
@@ -423,8 +432,8 @@ module Sequel
         tn = m2.call(table_name.to_s)
         table_id = get(Sequel.function(:object_id, tn))
         info_sch_sch = opts[:information_schema_schema]
-        inf_sch_qual = lambda{|s| info_sch_sch ? Sequel.qualify(info_sch_sch, s) : Sequel[s]}
-        sys_qual = lambda{|s| info_sch_sch ? Sequel.qualify(info_sch_sch, Sequel.qualify(Sequel.lit(''), s)) : Sequel[s]}
+        inf_sch_qual = lambda{|s| info_sch_sch ? Sequel.qualify(info_sch_sch, s) : Sequel.expr(s)}
+        sys_qual = lambda{|s| info_sch_sch ? Sequel.qualify(info_sch_sch, Sequel.qualify(Sequel.lit(''), s)) : Sequel.expr(s)}
 
         identity_cols = metadata_dataset.from(Sequel.lit('[sys].[columns]')).
           where(:object_id=>table_id, :is_identity=>true).
@@ -435,17 +444,17 @@ module Sequel
           get(:indid)
         pk_cols = metadata_dataset.from(sys_qual.call(Sequel.lit('sysindexkeys')).as(:sik)).
           join(sys_qual.call(Sequel.lit('syscolumns')).as(:sc), :id=>:id, :colid=>:colid).
-          where{{sik[:id]=>table_id, sik[:indid]=>pk_index_id}}.
-          select_order_map{sc[:name]}
+          where(:sik__id=>table_id, :sik__indid=>pk_index_id).
+          select_order_map(:sc__name)
 
-        ds = metadata_dataset.from(inf_sch_qual.call(Sequel[:information_schema][:tables]).as(:t)).
-         join(inf_sch_qual.call(Sequel[:information_schema][:columns]).as(:c), :table_catalog=>:table_catalog,
+        ds = metadata_dataset.from(inf_sch_qual.call(:information_schema__tables).as(:t)).
+         join(inf_sch_qual.call(:information_schema__columns).as(:c), :table_catalog=>:table_catalog,
               :table_schema => :table_schema, :table_name => :table_name).
-         select{[column_name.as(:column), data_type.as(:db_type), character_maximum_length.as(:max_chars), column_default.as(:default), is_nullable.as(:allow_null), numeric_precision.as(:column_size), numeric_scale.as(:scale)]}.
-         where{{c[:table_name]=>tn}}
+         select(:column_name___column, :data_type___db_type, :character_maximum_length___max_chars, :column_default___default, :is_nullable___allow_null, :numeric_precision___column_size, :numeric_scale___scale).
+         filter(:c__table_name=>tn)
 
         if schema = opts[:schema]
-          ds = ds.where{{c[:table_schema]=>schema}}
+          ds.filter!(:c__table_schema=>schema)
         end
 
         ds.map do |row|
@@ -454,7 +463,7 @@ module Sequel
           end
           row[:allow_null] = row[:allow_null] == 'YES' ? true : false
           row[:default] = nil if blank_object?(row[:default])
-          row[:type] = if row[:db_type] =~ /number|numeric|decimal/i && row[:scale] == 0
+          row[:type] = if row[:db_type] =~ DECIMAL_TYPE_RE && row[:scale] == 0
             :integer
           else
             schema_column_type(row[:db_type])
@@ -475,6 +484,12 @@ module Sequel
         :datetime
       end
 
+      # MSSQL has both datetime and timestamp classes, most people are going
+      # to want datetime
+      def type_literal_generic_time(column)
+        column[:only_time] ? :time : :datetime
+      end
+      
       # MSSQL doesn't have a true boolean class, so it uses bit
       def type_literal_generic_trueclass(column)
         :bit
@@ -493,53 +508,93 @@ module Sequel
   
     module DatasetMethods
       include(Module.new do
-        Dataset.def_sql_method(self, :select, %w'with select distinct limit columns into from lock join where group having compounds order')
+        Dataset.def_sql_method(self, :select, %w'with select distinct limit columns into from lock join where group having order compounds')
       end)
       include EmulateOffsetWithRowNumber
 
-      CONSTANT_MAP = {:CURRENT_DATE=>'CAST(CURRENT_TIMESTAMP AS DATE)'.freeze, :CURRENT_TIME=>'CAST(CURRENT_TIMESTAMP AS TIME)'.freeze}.freeze
-      EXTRACT_MAP = {:year=>"yy", :month=>"m", :day=>"d", :hour=>"hh", :minute=>"n", :second=>"s"}.freeze
-      EXTRACT_MAP.each_value(&:freeze)
-      LIMIT_ALL = Object.new.freeze
+      BOOL_TRUE = '1'.freeze
+      BOOL_FALSE = '0'.freeze
+      COMMA_SEPARATOR = ', '.freeze
+      NOLOCK = ' WITH (NOLOCK)'.freeze
+      UPDLOCK = ' WITH (UPDLOCK)'.freeze
+      WILDCARD = LiteralString.new('*').freeze
+      CONSTANT_MAP = {:CURRENT_DATE=>'CAST(CURRENT_TIMESTAMP AS DATE)'.freeze, :CURRENT_TIME=>'CAST(CURRENT_TIMESTAMP AS TIME)'.freeze}
+      EXTRACT_MAP = {:year=>"yy", :month=>"m", :day=>"d", :hour=>"hh", :minute=>"n", :second=>"s"}
+      BRACKET_CLOSE = Dataset::BRACKET_CLOSE
+      BRACKET_OPEN = Dataset::BRACKET_OPEN
+      COMMA = Dataset::COMMA
+      PAREN_CLOSE = Dataset::PAREN_CLOSE
+      PAREN_SPACE_OPEN = Dataset::PAREN_SPACE_OPEN
+      SPACE = Dataset::SPACE
+      FROM = Dataset::FROM
+      APOS = Dataset::APOS
+      APOS_RE = Dataset::APOS_RE
+      DOUBLE_APOS = Dataset::DOUBLE_APOS
+      INTO = Dataset::INTO
+      DOUBLE_BRACKET_CLOSE = ']]'.freeze
+      DATEPART_SECOND_OPEN = "CAST((datepart(".freeze
+      DATEPART_SECOND_MIDDLE = ') + datepart(ns, '.freeze
+      DATEPART_SECOND_CLOSE = ")/1000000000.0) AS double precision)".freeze
+      DATEPART_OPEN = "datepart(".freeze
+      OUTPUT_INSERTED = " OUTPUT INSERTED.*".freeze
+      HEX_START = '0x'.freeze
+      UNICODE_STRING_START = "N'".freeze
+      BACKSLASH_CRLF_RE = /\\((?:\r\n)|\n)/.freeze
+      BACKSLASH_CRLF_REPLACE = '\\\\\\\\\\1\\1'.freeze
+      TOP_PAREN = " TOP (".freeze
+      TOP = " TOP ".freeze
+      OUTPUT = " OUTPUT ".freeze
+      HSTAR = "H*".freeze
+      CASE_SENSITIVE_COLLATION = 'Latin1_General_CS_AS'.freeze
+      CASE_INSENSITIVE_COLLATION = 'Latin1_General_CI_AS'.freeze
+      DEFAULT_TIMESTAMP_FORMAT = "'%Y-%m-%dT%H:%M:%S%N%z'".freeze
+      FORMAT_DATE = "'%Y%m%d'".freeze
+      CROSS_APPLY = 'CROSS APPLY'.freeze
+      OUTER_APPLY = 'OUTER APPLY'.freeze
+      OFFSET = " OFFSET ".freeze
+      ROWS = " ROWS".freeze
+      ROWS_ONLY = " ROWS ONLY".freeze
+      FETCH_NEXT = " FETCH NEXT ".freeze
 
-      Dataset.def_sql_method(self, :delete, %w'with delete limit from output from2 where')
+      Dataset.def_mutation_method(:disable_insert_output, :output, :module=>self)
+      Dataset.def_sql_method(self, :delete, %w'with delete from output from2 where')
       Dataset.def_sql_method(self, :insert, %w'with insert into columns output values')
       Dataset.def_sql_method(self, :update, [['if is_2005_or_later?', %w'with update limit table set output from where'], ['else', %w'update table set output from where']])
 
+
+      # Allow overriding of the mssql_unicode_strings option at the dataset level.
+      attr_writer :mssql_unicode_strings
+
       # Use the database's mssql_unicode_strings setting if the dataset hasn't overridden it.
       def mssql_unicode_strings
-        opts.has_key?(:mssql_unicode_strings) ? opts[:mssql_unicode_strings] : db.mssql_unicode_strings
+        defined?(@mssql_unicode_strings) ? @mssql_unicode_strings : (@mssql_unicode_strings = db.mssql_unicode_strings)
       end
 
-      # Return a cloned dataset with the mssql_unicode_strings option set.
-      def with_mssql_unicode_strings(v)
-        clone(:mssql_unicode_strings=>v)
-      end
-
+      # MSSQL uses + for string concatenation, and LIKE is case insensitive by default.
       def complex_expression_sql_append(sql, op, args)
         case op
         when :'||'
           super(sql, :+, args)
         when :LIKE, :"NOT LIKE"
-          super(sql, op, args.map{|a| Sequel.lit(["(", " COLLATE Latin1_General_CS_AS)"], a)})
+          super(sql, op, args.map{|a| Sequel.lit(["(", " COLLATE #{CASE_SENSITIVE_COLLATION})"], a)})
         when :ILIKE, :"NOT ILIKE"
-          super(sql, (op == :ILIKE ? :LIKE : :"NOT LIKE"), args.map{|a| Sequel.lit(["(", " COLLATE Latin1_General_CI_AS)"], a)})
+          super(sql, (op == :ILIKE ? :LIKE : :"NOT LIKE"), args.map{|a| Sequel.lit(["(", " COLLATE #{CASE_INSENSITIVE_COLLATION})"], a)})
         when :<<, :>>
           complex_expression_emulate_append(sql, op, args)
         when :extract
-          part = args[0]
+          part = args.at(0)
           raise(Sequel::Error, "unsupported extract argument: #{part.inspect}") unless format = EXTRACT_MAP[part]
           if part == :second
-            expr = args[1]
-            sql << "CAST((datepart(" << format.to_s << ', '
+            expr = args.at(1)
+            sql << DATEPART_SECOND_OPEN << format.to_s << COMMA
             literal_append(sql, expr)
-            sql << ') + datepart(ns, '
+            sql << DATEPART_SECOND_MIDDLE
             literal_append(sql, expr)
-            sql << ")/1000000000.0) AS double precision)"
+            sql << DATEPART_SECOND_CLOSE
           else
-            sql << "datepart(" << format.to_s << ', '
-            literal_append(sql, args[1])
-            sql << ')'
+            sql << DATEPART_OPEN << format.to_s << COMMA
+            literal_append(sql, args.at(1))
+            sql << PAREN_CLOSE
           end
         else
           super
@@ -573,15 +628,13 @@ module Sequel
       # MSSQL uses the CONTAINS keyword for full text search
       def full_text_search(cols, terms, opts = OPTS)
         terms = "\"#{terms.join('" OR "')}\"" if terms.is_a?(Array)
-        where(Sequel.lit("CONTAINS (?, ?)", cols, terms))
+        filter("CONTAINS (?, ?)", cols, terms)
       end
 
-      # Insert a record, returning the record inserted, using OUTPUT.  Always returns nil without
-      # running an INSERT statement if disable_insert_output is used.  If the query runs
-      # but returns no values, returns false.
+      # Use the OUTPUT clause to get the value of all columns for the newly inserted record.
       def insert_select(*values)
         return unless supports_insert_select?
-        with_sql_first(insert_select_sql(*values)) || false
+        with_sql_first(insert_select_sql(*values))
       end
 
       # Add OUTPUT clause unless there is already an existing output clause, then return
@@ -616,8 +669,8 @@ module Sequel
       #
       # Examples:
       #
-      #   dataset.output(:output_table, [Sequel[:deleted][:id], Sequel[:deleted][:name]])
-      #   dataset.output(:output_table, id: Sequel[:inserted][:id], name: Sequel[:inserted][:name])
+      #   dataset.output(:output_table, [:deleted__id, :deleted__name])
+      #   dataset.output(:output_table, :id => :inserted__id, :name => :inserted__name)
       def output(into, values)
         raise(Error, "SQL Server versions 2000 and earlier do not support the OUTPUT clause") unless supports_output_clause?
         output = {}
@@ -633,7 +686,7 @@ module Sequel
 
       # MSSQL uses [] to quote identifiers.
       def quoted_identifier_append(sql, name)
-        sql << '[' << name.to_s.gsub(/\]/, ']]') << ']'
+        sql << BRACKET_OPEN << name.to_s.gsub(/\]/, DOUBLE_BRACKET_CLOSE) << BRACKET_CLOSE
       end
 
       # Emulate RETURNING using the output clause.  This only handles values that are simple column references.
@@ -678,7 +731,7 @@ module Sequel
         is_2005_or_later?
       end
 
-      # MSSQL 2008+ supports GROUPING SETS
+      # MSSQL 2005+ supports GROUPING SETS
       def supports_grouping_sets?
         is_2008_or_later?
       end
@@ -713,11 +766,6 @@ module Sequel
         false
       end
       
-      # MSSQL supports NOWAIT.
-      def supports_nowait?
-        true
-      end
-
       # MSSQL 2012+ supports offsets in correlated subqueries.
       def supports_offsets_in_correlated_subqueries?
         is_2012_or_later?
@@ -731,11 +779,6 @@ module Sequel
       # MSSQL 2005+ can emulate RETURNING via the OUTPUT clause.
       def supports_returning?(type)
         supports_insert_select?
-      end
-
-      # MSSQL uses READPAST to skip locked rows.
-      def supports_skip_locked?
-        true
       end
 
       # MSSQL 2005+ supports window functions
@@ -767,36 +810,12 @@ module Sequel
         end
       end
 
-      # MSSQL does not allow ordering in sub-clauses unless TOP (limit) is specified
+      # MSSQL does not allow ordering in sub-clauses unless 'top' (limit) is specified
       def aggregate_dataset
         (options_overlap(Sequel::Dataset::COUNT_FROM_SELF_OPTS) && !options_overlap([:limit])) ? unordered.from_self : super
       end
 
-      # If the dataset using a order without a limit or offset or custom SQL, 
-      # remove the order.  Compounds on Microsoft SQL Server have undefined
-      # order unless the result is specifically ordered.  Applying the current
-      # order before the compound doesn't work in all cases, such as when
-      # qualified identifiers are used.  If you want to ensure a order
-      # for a compound dataset, apply the order after all compounds have been
-      # added.
-      def compound_from_self
-        if @opts[:offset] && !@opts[:limit] && !is_2012_or_later?
-          clone(:limit=>LIMIT_ALL).from_self
-        elsif @opts[:order]  && !(@opts[:sql] || @opts[:limit] || @opts[:offset])
-          unordered
-        else
-          super
-        end
-      end
-
       private
-
-      # Allow update and delete for unordered, limited datasets only.
-      def check_not_limited!(type)
-        return if @opts[:skip_limit_check] && type != :truncate
-        raise Sequel::InvalidOperation, "Dataset##{type} not suppored on ordered, limited datasets" if opts[:order] && opts[:limit]
-        super if type == :truncate || @opts[:offset]
-      end
 
       # Whether we are using SQL Server 2005 or later.
       def is_2005_or_later?
@@ -817,12 +836,12 @@ module Sequel
       # since that is the format that is multilanguage and not
       # DATEFORMAT dependent.
       def default_timestamp_format
-        "'%Y-%m-%dT%H:%M:%S%N%z'"
+        DEFAULT_TIMESTAMP_FORMAT
       end
 
       # Only include the primary table in the main delete clause
       def delete_from_sql(sql)
-        sql << ' FROM '
+        sql << FROM
         source_list_append(sql, @opts[:from][0..0])
       end
 
@@ -856,7 +875,7 @@ module Sequel
         end
       end
       
-      # Microsoft SQL Server 2012+ has native support for offsets, but only for ordered datasets.
+      # Microsoft SQL Server 2012 has native support for offsets, but only for ordered datasets.
       def emulate_offset_with_row_number?
         super && !(is_2012_or_later? && @opts[:order])
       end
@@ -876,9 +895,9 @@ module Sequel
       def join_type_sql(join_type)
         case join_type
         when :cross_apply
-          'CROSS APPLY'
+          CROSS_APPLY
         when :outer_apply
-          'OUTER APPLY'
+          OUTER_APPLY
         else
           super
         end
@@ -886,30 +905,30 @@ module Sequel
 
       # MSSQL uses a literal hexidecimal number for blob strings
       def literal_blob_append(sql, v)
-        sql << '0x' << v.unpack("H*").first
+        sql << HEX_START << v.unpack(HSTAR).first
       end
       
-      # Use YYYYmmdd format, since that's the only format that is
+      # Use YYYYmmdd format, since that's the only want that is
       # multilanguage and not DATEFORMAT dependent.
       def literal_date(v)
-        v.strftime("'%Y%m%d'")
+        v.strftime(FORMAT_DATE)
       end
 
       # Use 0 for false on MSSQL
       def literal_false
-        '0'
+        BOOL_FALSE
       end
 
       # Optionally use unicode string syntax for all strings. Don't double
       # backslashes.
       def literal_string_append(sql, v)
-        sql << (mssql_unicode_strings ? "N'" : "'")
-        sql << v.gsub("'", "''").gsub(/\\((?:\r\n)|\n)/, '\\\\\\\\\\1\\1') << "'"
+        sql << (mssql_unicode_strings ? UNICODE_STRING_START : APOS)
+        sql << v.gsub(APOS_RE, DOUBLE_APOS).gsub(BACKSLASH_CRLF_RE, BACKSLASH_CRLF_REPLACE) << APOS
       end
       
       # Use 1 for true on MSSQL
       def literal_true
-        '1'
+        BOOL_TRUE
       end
       
       # MSSQL 2008+ supports multiple rows in the VALUES clause, older versions
@@ -918,70 +937,38 @@ module Sequel
         is_2008_or_later? ? :values : :union
       end
 
-      def non_sql_option?(key)
-        super || key == :disable_insert_output || key == :mssql_unicode_strings
-      end
-
       def select_into_sql(sql)
         if i = @opts[:into]
-          sql << " INTO "
+          sql << INTO
           identifier_append(sql, i)
         end
       end
 
-      # MSSQL 2000 uses TOP N for limit.  For MSSQL 2005+ TOP (N) is used
+      # MSSQL uses TOP N for limit.  For MSSQL 2005+ TOP (N) is used
       # to allow the limit to be a bound variable.
       def select_limit_sql(sql)
         if l = @opts[:limit]
           return if is_2012_or_later? && @opts[:order] && @opts[:offset]
-          shared_limit_sql(sql, l)
-        end
-      end
 
-      def shared_limit_sql(sql, l)
-        if is_2005_or_later?
-          if l == LIMIT_ALL
-            sql << " TOP (100) PERCENT"
-          else
-            sql << " TOP ("
+          if is_2005_or_later?
+            sql << TOP_PAREN
             literal_append(sql, l)
-            sql << ')'
+            sql << PAREN_CLOSE
+          else
+            sql << TOP
+            literal_append(sql, l)
           end
-        else
-          sql << " TOP "
-          literal_append(sql, l)
         end
       end
+      alias update_limit_sql select_limit_sql
 
-      def update_limit_sql(sql)
-        if l = @opts[:limit]
-          shared_limit_sql(sql, l)
-        end
-      end
-      alias delete_limit_sql update_limit_sql
-
-      # Handle dirty, skip locked, and for update locking
+      # Support different types of locking styles
       def select_lock_sql(sql)
-        lock = @opts[:lock]
-        skip_locked = @opts[:skip_locked]
-        nowait = @opts[:nowait]
-        for_update = lock == :update
-        dirty = lock == :dirty
-        lock_hint = for_update || dirty
-
-        if lock_hint || skip_locked
-          sql << " WITH ("
-
-          if lock_hint
-            sql << (for_update ? 'UPDLOCK' : 'NOLOCK')
-          end
-
-          if skip_locked || nowait
-            sql << ', ' if lock_hint
-            sql << (skip_locked ? "READPAST" : "NOWAIT")
-          end
-
-          sql << ')'
+        case @opts[:lock]
+        when :update
+          sql << UPDLOCK
+        when :dirty
+          sql << NOLOCK
         else
           super
         end
@@ -993,19 +980,20 @@ module Sequel
         super
         if is_2012_or_later? && @opts[:order]
           if o = @opts[:offset]
-            sql << " OFFSET "
+            sql << OFFSET
             literal_append(sql, o)
-            sql << " ROWS"
+            sql << ROWS
 
             if l = @opts[:limit]
-              sql << " FETCH NEXT "
+              sql << FETCH_NEXT
               literal_append(sql, l)
-              sql << " ROWS ONLY"
+              sql << ROWS_ONLY
             end
           end
         end
       end
 
+      # SQL fragment for MSSQL's OUTPUT clause.
       def output_sql(sql, type)
         return unless supports_output_clause?
         if output = @opts[:output]
@@ -1016,21 +1004,21 @@ module Sequel
       end
 
       def output_list_sql(sql, output)
-        sql << " OUTPUT "
+        sql << OUTPUT
         column_list_append(sql, output[:select_list])
         if into = output[:into]
-          sql << " INTO "
+          sql << INTO
           identifier_append(sql, into)
           if column_list = output[:column_list]
-            sql << ' ('
+            sql << PAREN_SPACE_OPEN
             source_list_append(sql, column_list)
-            sql << ')'
+            sql << PAREN_CLOSE
           end
         end
       end
 
       def output_returning_sql(sql, type, values)
-        sql << " OUTPUT "
+        sql << OUTPUT
         if values.empty?
           literal_append(sql, SQL::ColumnAll.new(type))
         else
@@ -1046,22 +1034,14 @@ module Sequel
         end
       end
 
-      # MSSQL supports 100-nsec precision for time columns, but ruby by
-      # default only supports usec precision.
-      def sqltime_precision
-        6
-      end
-
-      # MSSQL supports millisecond timestamp precision for datetime columns.
-      # 100-nsec precision is supported for datetime2 columns, but Sequel does
-      # not know what the column type is when formatting values.
+      # MSSQL supports millisecond timestamp precision.
       def timestamp_precision
         3
       end
 
       # Only include the primary table in the main update clause
       def update_table_sql(sql)
-        sql << ' '
+        sql << SPACE
         source_list_append(sql, @opts[:from][0..0])
       end
 

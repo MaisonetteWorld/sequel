@@ -6,13 +6,18 @@ VERS = lambda do
   require File.expand_path("../lib/sequel/version", __FILE__)
   Sequel.version
 end
-CLEAN.include ["sequel-*.gem", "rdoc", "coverage", "www/public/*.html", "www/public/rdoc*", "spec/bin-sequel-*"]
+CLEAN.include ["**/.*.sw?", "sequel-*.gem", ".config", "rdoc", "coverage", "www/public/*.html", "www/public/rdoc*", '**/*.rbc']
 
-# Gem Packaging
+# Gem Packaging and Release
 
 desc "Build sequel gem"
 task :package=>[:clean] do |p|
   sh %{#{FileUtils::RUBY} -S gem build sequel.gemspec}
+end
+
+desc "Publish sequel gem to rubygems.org"
+task :release=>[:package] do
+  sh %{#{FileUtils::RUBY} -S gem push ./#{NAME}-#{VERS.call}.gem}
 end
 
 ### Website
@@ -24,7 +29,7 @@ end
 
 ### RDoc
 
-RDOC_DEFAULT_OPTS = ["--line-numbers", '--title', 'Sequel: The Database Toolkit for Ruby']
+RDOC_DEFAULT_OPTS = ["--line-numbers", "--inline-source", '--title', 'Sequel: The Database Toolkit for Ruby']
 
 begin
   # Sequel uses hanna-nouveau for the website RDoc.
@@ -33,68 +38,79 @@ begin
 rescue Gem::LoadError
 end
 
-require "rdoc/task"
-
-RDOC_OPTS = RDOC_DEFAULT_OPTS + ['--main', 'README.rdoc']
-
-RDoc::Task.new do |rdoc|
-  rdoc.rdoc_dir = "rdoc"
-  rdoc.options += RDOC_OPTS
-  rdoc.rdoc_files.add %w"README.rdoc CHANGELOG MIT-LICENSE lib/**/*.rb doc/*.rdoc doc/release_notes/*.txt"
+rdoc_task_class = begin
+  require "rdoc/task"
+  RDoc::Task
+rescue LoadError
+  begin
+    require "rake/rdoctask"
+    Rake::RDocTask
+  rescue LoadError, StandardError
+  end
 end
 
-desc "Make rdoc for website"
-task :website_rdoc=>[:website_rdoc_main, :website_rdoc_adapters, :website_rdoc_plugins]
+if rdoc_task_class
+  RDOC_OPTS = RDOC_DEFAULT_OPTS + ['--main', 'README.rdoc']
 
-RDoc::Task.new(:website_rdoc_main) do |rdoc|
-  rdoc.rdoc_dir = "www/public/rdoc"
-  rdoc.options += RDOC_OPTS + %w'--no-ignore-invalid'
-  rdoc.rdoc_files.add %w"README.rdoc CHANGELOG doc/CHANGELOG.old MIT-LICENSE lib/*.rb lib/sequel/*.rb lib/sequel/{connection_pool,dataset,database,model}/*.rb doc/*.rdoc doc/release_notes/*.txt lib/sequel/extensions/migration.rb"
-end
+  rdoc_task_class.new do |rdoc|
+    rdoc.rdoc_dir = "rdoc"
+    rdoc.options += RDOC_OPTS
+    rdoc.rdoc_files.add %w"README.rdoc CHANGELOG MIT-LICENSE lib/**/*.rb doc/*.rdoc doc/release_notes/*.txt"
+  end
 
-RDoc::Task.new(:website_rdoc_adapters) do |rdoc|
-  rdoc.rdoc_dir = "www/public/rdoc-adapters"
-  rdoc.options += RDOC_DEFAULT_OPTS + %w'--main Sequel --no-ignore-invalid'
-  rdoc.rdoc_files.add %w"lib/sequel/adapters/**/*.rb"
-end
+  desc "Make rdoc for website"
+  task :website_rdoc=>[:website_rdoc_main, :website_rdoc_adapters, :website_rdoc_plugins]
 
-RDoc::Task.new(:website_rdoc_plugins) do |rdoc|
-  rdoc.rdoc_dir = "www/public/rdoc-plugins"
-  rdoc.options += RDOC_DEFAULT_OPTS + %w'--main Sequel --no-ignore-invalid'
-  rdoc.rdoc_files.add %w"lib/sequel/{extensions,plugins}/**/*.rb doc/core_*"
+  rdoc_task_class.new(:website_rdoc_main) do |rdoc|
+    rdoc.rdoc_dir = "www/public/rdoc"
+    rdoc.options += RDOC_OPTS + %w'--no-ignore-invalid'
+    rdoc.rdoc_files.add %w"README.rdoc CHANGELOG MIT-LICENSE lib/*.rb lib/sequel/*.rb lib/sequel/{connection_pool,dataset,database,model}/*.rb doc/*.rdoc doc/release_notes/*.txt lib/sequel/extensions/migration.rb"
+  end
+
+  rdoc_task_class.new(:website_rdoc_adapters) do |rdoc|
+    rdoc.rdoc_dir = "www/public/rdoc-adapters"
+    rdoc.options += RDOC_DEFAULT_OPTS + %w'--main Sequel --no-ignore-invalid'
+    rdoc.rdoc_files.add %w"lib/sequel/adapters/**/*.rb"
+  end
+
+  rdoc_task_class.new(:website_rdoc_plugins) do |rdoc|
+    rdoc.rdoc_dir = "www/public/rdoc-plugins"
+    rdoc.options += RDOC_DEFAULT_OPTS + %w'--main Sequel --no-ignore-invalid'
+    rdoc.rdoc_files.add %w"lib/sequel/{extensions,plugins}/**/*.rb doc/core_*"
+  end
 end
 
 ### Specs
 
-run_spec = proc do |file|
+run_spec = proc do |patterns|
   lib_dir = File.join(File.dirname(File.expand_path(__FILE__)), 'lib')
   rubylib = ENV['RUBYLIB']
   ENV['RUBYLIB'] ? (ENV['RUBYLIB'] += ":#{lib_dir}") : (ENV['RUBYLIB'] = lib_dir)
-  sh "#{FileUtils::RUBY} #{file}"
+  if RUBY_PLATFORM =~ /mingw32/ || RUBY_DESCRIPTION =~ /windows/i
+    patterns = patterns.split.map{|pat| Dir[pat].to_a}.flatten.join(' ')
+  end
+  sh "#{FileUtils::RUBY} -e \"ARGV.each{|f| require f}\" #{patterns}"
   ENV['RUBYLIB'] = rubylib
 end
 
-spec_task = proc do |description, name, file, coverage|
+spec_task = proc do |description, name, files, coverage|
   desc description
   task name do
-    run_spec.call(file)
+    run_spec.call(files)
   end
 
   desc "#{description} with warnings, some warnings filtered"
   task :"#{name}_w" do
-    rubyopt = ENV['RUBYOPT']
-    ENV['RUBYOPT'] = "#{rubyopt} -w"
-    ENV['WARNING'] = '1'
-    run_spec.call(file)
-    ENV.delete('WARNING')
-    ENV['RUBYOPT'] = rubyopt
+    ENV['RUBYOPT'] ? (ENV['RUBYOPT'] += " -w") : (ENV['RUBYOPT'] = '-w')
+    rake = ENV['RAKE'] || "#{FileUtils::RUBY} -S rake"
+    sh "#{rake} #{name} 2>&1 | egrep -v \"(: warning: instance variable @.* not initialized|: warning: method redefined; discarding old|: warning: previous definition of)\""
   end
 
   if coverage
     desc "#{description} with coverage"
     task :"#{name}_cov" do
       ENV['COVERAGE'] = '1'
-      run_spec.call(file)
+      run_spec.call(files)
       ENV.delete('COVERAGE')
     end
   end
@@ -105,19 +121,19 @@ task :default => :spec
 desc "Run the core, model, and extension/plugin specs"
 task :spec => [:spec_core, :spec_model, :spec_plugin]
 
-spec_task.call("Run core and model specs together", :spec_core_model, 'spec/core_model_spec.rb', true)
-spec_task.call("Run core specs", :spec_core, 'spec/core_spec.rb', false)
-spec_task.call("Run model specs", :spec_model, 'spec/model_spec.rb', false)
-spec_task.call("Run plugin/extension specs", :spec_plugin, 'spec/plugin_spec.rb', true)
-spec_task.call("Run bin/sequel specs", :spec_bin, 'spec/bin_spec.rb', false)
-spec_task.call("Run core extensions specs", :spec_core_ext, 'spec/core_extensions_spec.rb', true)
-spec_task.call("Run integration tests", :spec_integration, 'spec/adapter_spec.rb none', true)
+spec_task.call("Run core and model specs together", :spec_core_model, './spec/core/*_spec.rb ./spec/model/*_spec.rb', true)
+spec_task.call("Run core specs", :spec_core, './spec/core/*_spec.rb', false)
+spec_task.call("Run model specs", :spec_model, './spec/model/*_spec.rb', false)
+spec_task.call("Run plugin/extension specs", :spec_plugin, './spec/extensions/*_spec.rb', true)
+spec_task.call("Run bin/sequel specs", :spec_bin, './spec/bin_spec.rb', false)
+spec_task.call("Run core extensions specs", :spec_core_ext, './spec/core_extensions_spec.rb', true)
+spec_task.call("Run integration tests", :spec_integration, './spec/integration/*_test.rb', true)
 
-%w'postgres sqlite mysql oracle mssql db2 sqlanywhere'.each do |adapter|
-  spec_task.call("Run #{adapter} tests", :"spec_#{adapter}", "spec/adapter_spec.rb #{adapter}", true)
+%w'postgres sqlite mysql informix oracle firebird mssql db2 sqlanywhere'.each do |adapter|
+  spec_task.call("Run #{adapter} tests", :"spec_#{adapter}", "./spec/adapters/#{adapter}_spec.rb ./spec/integration/*_test.rb", true)
 end
 
-spec_task.call("Run model specs without the associations code", :_spec_model_no_assoc, 'spec/model_no_assoc_spec.rb', false)
+spec_task.call("Run model specs without the associations code", :_spec_model_no_assoc, Dir["./spec/model/*_spec.rb"].delete_if{|f| f =~ /association|eager_loading/}.join(' '), false)
 desc "Run model specs without the associations code"
 task :spec_model_no_assoc do
   ENV['SEQUEL_NO_ASSOCIATIONS'] = '1'

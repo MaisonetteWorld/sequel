@@ -1,13 +1,15 @@
 # frozen-string-literal: true
 
 require 'sqlite3'
-require_relative 'shared/sqlite'
+Sequel.require 'adapters/shared/sqlite'
 
 module Sequel
+  # Top level module for holding all SQLite-related modules and classes
+  # for Sequel.
   module SQLite
-    FALSE_VALUES = (%w'0 false f no n' + [0]).freeze
+    TYPE_TRANSLATOR = tt = Class.new do
+      FALSE_VALUES = (%w'0 false f no n' + [0]).freeze
 
-    tt = Class.new do
       def blob(s)
         Sequel::SQL::Blob.new(s.to_s)
       end
@@ -40,7 +42,7 @@ module Sequel
 
       def numeric(s)
         s = s.to_s unless s.is_a?(String)
-        BigDecimal(s) rescue s
+        ::BigDecimal.new(s) rescue s
       end
 
       def time(s)
@@ -56,6 +58,7 @@ module Sequel
           raise Sequel::Error, "unhandled type when converting to date: #{s.inspect} (#{s.class.inspect})"
         end
       end
+
     end.new
 
     # Hash with string keys and callable values for converting SQLite types.
@@ -71,8 +74,9 @@ module Sequel
     }.each do |k,v|
       k.each{|n| SQLITE_TYPES[n] = v}
     end
-    SQLITE_TYPES.freeze
     
+    # Database class for SQLite databases used with Sequel and the
+    # ruby-sqlite3 driver.
     class Database < Sequel::Database
       include ::Sequel::SQLite::DatabaseMethods
       
@@ -105,7 +109,7 @@ module Sequel
         db = ::SQLite3::Database.new(opts[:database].to_s, sqlite3_opts)
         db.busy_timeout(opts.fetch(:timeout, 5000))
         
-        connection_pragmas.each{|s| log_connection_yield(s, db){db.execute_batch(s)}}
+        connection_pragmas.each{|s| log_yield(s){db.execute_batch(s)}}
         
         class << db
           attr_reader :prepared_statements
@@ -142,15 +146,11 @@ module Sequel
         end
       end
       
+      # Run the given SQL with the given arguments and return the last inserted row id.
       def execute_insert(sql, opts=OPTS)
         _execute(:insert, sql, opts)
       end
       
-      def freeze
-        @conversion_procs.freeze
-        super
-      end
-
       # Handle Integer and Float arguments, since SQLite can store timestamps as integers and floats.
       def to_application_timestamp(s)
         case s
@@ -181,15 +181,15 @@ module Sequel
             return execute_prepared_statement(conn, type, sql, opts, &block) if sql.is_a?(Symbol)
             log_args = opts[:arguments]
             args = {}
-            opts.fetch(:arguments, OPTS).each{|k, v| args[k] = prepared_statement_argument(v)}
+            opts.fetch(:arguments, {}).each{|k, v| args[k] = prepared_statement_argument(v)}
             case type
             when :select
-              log_connection_yield(sql, conn, log_args){conn.query(sql, args, &block)}
+              log_yield(sql, log_args){conn.query(sql, args, &block)}
             when :insert
-              log_connection_yield(sql, conn, log_args){conn.execute(sql, args)}
+              log_yield(sql, log_args){conn.execute(sql, args)}
               conn.last_insert_row_id
             when :update
-              log_connection_yield(sql, conn, log_args){conn.execute_batch(sql, args)}
+              log_yield(sql, log_args){conn.execute_batch(sql, args)}
               conn.changes
             end
           end
@@ -241,7 +241,7 @@ module Sequel
           end
         end
         unless cps
-          cps = log_connection_yield("PREPARE #{name}: #{sql}", conn){conn.prepare(sql)}
+          cps = log_yield("PREPARE #{name}: #{sql}"){conn.prepare(sql)}
           conn.prepared_statements[name] = [cps, sql]
         end
         log_sql = String.new
@@ -252,9 +252,9 @@ module Sequel
           log_sql << ")"
         end
         if block
-          log_connection_yield(log_sql, conn, args){cps.execute(ps_args, &block)}
+          log_yield(log_sql, args){cps.execute(ps_args, &block)}
         else
-          log_connection_yield(log_sql, conn, args){cps.execute!(ps_args){|r|}}
+          log_yield(log_sql, args){cps.execute!(ps_args){|r|}}
           case type
           when :insert
             conn.last_insert_row_id
@@ -269,23 +269,17 @@ module Sequel
       def database_error_classes
         [SQLite3::Exception, ArgumentError]
       end
-
-      def dataset_class_default
-        Dataset
-      end
-
-      # Support SQLite exception codes if ruby-sqlite3 supports them.
-      # This is disabled by default because ruby-sqlite3 doesn't currently
-      # support them (returning nil), and even if it did, it doesn't support
-      # extended error codes, which would lead to worse behavior.
-      #def sqlite_error_code(exception)
-      #  exception.code if exception.respond_to?(:code)
-      #end
     end
     
+    # Dataset class for SQLite datasets that use the ruby-sqlite3 driver.
     class Dataset < Sequel::Dataset
       include ::Sequel::SQLite::DatasetMethods
 
+      Database::DatasetClass = self
+      
+      PREPARED_ARG_PLACEHOLDER = ':'.freeze
+      
+      # SQLite already supports named bind arguments, so use directly.
       module ArgumentMapper
         include Sequel::Dataset::ArgumentMapper
         
@@ -306,18 +300,31 @@ module Sequel
         def prepared_arg(k)
           LiteralString.new("#{prepared_arg_placeholder}#{k.to_s.gsub('.', '__')}")
         end
+
+        # Always assume a prepared argument.
+        def prepared_arg?(k)
+          true
+        end
       end
       
       BindArgumentMethods = prepared_statements_module(:bind, ArgumentMapper)
       PreparedStatementMethods = prepared_statements_module(:prepare, BindArgumentMethods)
 
+      # Execute the given type of statement with the hash of values.
+      def call(type, bind_vars={}, *values, &block)
+        ps = to_prepared_statement(type, values)
+        ps.extend(BindArgumentMethods)
+        ps.call(bind_vars, &block)
+      end
+      
+      # Yield a hash for each row in the dataset.
       def fetch_rows(sql)
         execute(sql) do |result|
           i = -1
           cps = db.conversion_procs
           type_procs = result.types.map{|t| cps[base_type_name(t)]}
           cols = result.columns.map{|c| i+=1; [output_identifier(c), i, type_procs[i]]}
-          self.columns = cols.map(&:first)
+          @columns = cols.map(&:first)
           result.each do |values|
             row = {}
             cols.each do |name,id,type_proc|
@@ -332,6 +339,19 @@ module Sequel
         end
       end
       
+      # Prepare the given type of query with the given name and store
+      # it in the database.  Note that a new native prepared statement is
+      # created on each call to this prepared statement.
+      def prepare(type, name=nil, *values)
+        ps = to_prepared_statement(type, values)
+        ps.extend(PreparedStatementMethods)
+        if name
+          ps.prepared_statement_name = name
+          db.set_prepared_statement(name, ps)
+        end
+        ps
+      end
+      
       private
       
       # The base type name for a given type, without any parenthetical part.
@@ -344,17 +364,9 @@ module Sequel
         sql << "'" << ::SQLite3::Database.quote(v) << "'"
       end
 
-      def bound_variable_modules
-        [BindArgumentMethods]
-      end
-
-      def prepared_statement_modules
-        [PreparedStatementMethods]
-      end
-
       # SQLite uses a : before the name of the argument as a placeholder.
       def prepared_arg_placeholder
-        ':'
+        PREPARED_ARG_PLACEHOLDER
       end
     end
   end

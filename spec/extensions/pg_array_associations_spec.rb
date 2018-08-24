@@ -1,9 +1,8 @@
-require_relative "spec_helper"
+require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
 
 describe Sequel::Model, "pg_array_associations" do
   before do
-    @db = Sequel.mock(:host=>'postgres', :numrows=>1)
-    @db.extend_datasets{def quote_identifiers?; false end}
+    @db = Sequel.mock(:numrows=>1)
     class ::Artist < Sequel::Model(@db)
       attr_accessor :yyy
       columns :id, :tag_ids
@@ -22,8 +21,8 @@ describe Sequel::Model, "pg_array_associations" do
     end
     @c1 = Artist
     @c2 = Tag
-    @c1.dataset = @c1.dataset.with_fetch(:id=>1, :tag_ids=>Sequel.pg_array([1,2,3]))
-    @c2.dataset = @c2.dataset.with_fetch(:id=>2)
+    @c1.dataset._fetch = {:id=>1, :tag_ids=>Sequel.pg_array([1,2,3])}
+    @c2.dataset._fetch = {:id=>2}
     @o1 = @c1.first
     @o2 = @c2.first
     @n1 = @c1.new
@@ -71,8 +70,8 @@ describe Sequel::Model, "pg_array_associations" do
   end
 
   it "should allowing filtering by associations with :conditions" do
-    @c1.filter(:a_tags=>@o2).sql.must_equal "SELECT * FROM artists WHERE coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE ((name = 'A') AND (tags.id IS NOT NULL) AND (tags.id = 2)))), false)"
-    @c2.filter(:a_artists=>@o1).sql.must_equal "SELECT * FROM tags WHERE (tags.id IN (SELECT _smtopgaa_key_ FROM artists CROSS JOIN unnest(artists.tag_ids) AS _smtopgaa_(_smtopgaa_key_) WHERE ((name = 'A') AND (artists.tag_ids IS NOT NULL) AND (artists.id = 1))))"
+    @c1.filter(:a_tags=>@o2).sql.must_equal "SELECT * FROM artists WHERE coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE ((name = 'A') AND (tags.id IS NOT NULL) AND (tags.id = 2)))), 'f')"
+    @c2.filter(:a_artists=>@o1).sql.must_equal "SELECT * FROM tags WHERE (tags.id IN (SELECT unnest(artists.tag_ids) FROM artists WHERE ((name = 'A') AND (artists.tag_ids IS NOT NULL) AND (artists.id = 1))))"
   end
 
   it "should allowing excluding by associations" do
@@ -81,8 +80,8 @@ describe Sequel::Model, "pg_array_associations" do
   end
 
   it "should allowing excluding by associations with :conditions" do
-    @c1.exclude(:a_tags=>@o2).sql.must_equal "SELECT * FROM artists WHERE (NOT coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE ((name = 'A') AND (tags.id IS NOT NULL) AND (tags.id = 2)))), false) OR (artists.tag_ids IS NULL))"
-    @c2.exclude(:a_artists=>@o1).sql.must_equal "SELECT * FROM tags WHERE ((tags.id NOT IN (SELECT _smtopgaa_key_ FROM artists CROSS JOIN unnest(artists.tag_ids) AS _smtopgaa_(_smtopgaa_key_) WHERE ((name = 'A') AND (artists.tag_ids IS NOT NULL) AND (artists.id = 1)))) OR (tags.id IS NULL))"
+    @c1.exclude(:a_tags=>@o2).sql.must_equal "SELECT * FROM artists WHERE (NOT coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE ((name = 'A') AND (tags.id IS NOT NULL) AND (tags.id = 2)))), 'f') OR (artists.tag_ids IS NULL))"
+    @c2.exclude(:a_artists=>@o1).sql.must_equal "SELECT * FROM tags WHERE ((tags.id NOT IN (SELECT unnest(artists.tag_ids) FROM artists WHERE ((name = 'A') AND (artists.tag_ids IS NOT NULL) AND (artists.id = 1)))) OR (tags.id IS NULL))"
   end
 
   it "should allowing filtering by multiple associations" do
@@ -91,8 +90,8 @@ describe Sequel::Model, "pg_array_associations" do
   end
 
   it "should allowing filtering by multiple associations with :conditions" do
-    @c1.filter(:a_tags=>[@c2.load(:id=>1), @c2.load(:id=>2)]).sql.must_equal "SELECT * FROM artists WHERE coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE ((name = 'A') AND (tags.id IS NOT NULL) AND (tags.id IN (1, 2))))), false)"
-    @c2.filter(:a_artists=>[@c1.load(:id=>7, :tag_ids=>Sequel.pg_array([3, 4])), @c1.load(:id=>8, :tag_ids=>Sequel.pg_array([4, 5]))]).sql.must_equal "SELECT * FROM tags WHERE (tags.id IN (SELECT _smtopgaa_key_ FROM artists CROSS JOIN unnest(artists.tag_ids) AS _smtopgaa_(_smtopgaa_key_) WHERE ((name = 'A') AND (artists.tag_ids IS NOT NULL) AND (artists.id IN (7, 8)))))"
+    @c1.filter(:a_tags=>[@c2.load(:id=>1), @c2.load(:id=>2)]).sql.must_equal "SELECT * FROM artists WHERE coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE ((name = 'A') AND (tags.id IS NOT NULL) AND (tags.id IN (1, 2))))), 'f')"
+    @c2.filter(:a_artists=>[@c1.load(:id=>7, :tag_ids=>Sequel.pg_array([3, 4])), @c1.load(:id=>8, :tag_ids=>Sequel.pg_array([4, 5]))]).sql.must_equal "SELECT * FROM tags WHERE (tags.id IN (SELECT unnest(artists.tag_ids) FROM artists WHERE ((name = 'A') AND (artists.tag_ids IS NOT NULL) AND (artists.id IN (7, 8)))))"
   end
 
   it "should allowing excluding by multiple associations" do
@@ -101,41 +100,41 @@ describe Sequel::Model, "pg_array_associations" do
   end
 
   it "should allowing excluding by multiple associations with :conditions" do
-    @c1.exclude(:a_tags=>[@c2.load(:id=>1), @c2.load(:id=>2)]).sql.must_equal "SELECT * FROM artists WHERE (NOT coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE ((name = 'A') AND (tags.id IS NOT NULL) AND (tags.id IN (1, 2))))), false) OR (artists.tag_ids IS NULL))"
-    @c2.exclude(:a_artists=>[@c1.load(:id=>7, :tag_ids=>Sequel.pg_array([3, 4])), @c1.load(:id=>8, :tag_ids=>Sequel.pg_array([4, 5]))]).sql.must_equal "SELECT * FROM tags WHERE ((tags.id NOT IN (SELECT _smtopgaa_key_ FROM artists CROSS JOIN unnest(artists.tag_ids) AS _smtopgaa_(_smtopgaa_key_) WHERE ((name = 'A') AND (artists.tag_ids IS NOT NULL) AND (artists.id IN (7, 8))))) OR (tags.id IS NULL))"
+    @c1.exclude(:a_tags=>[@c2.load(:id=>1), @c2.load(:id=>2)]).sql.must_equal "SELECT * FROM artists WHERE (NOT coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE ((name = 'A') AND (tags.id IS NOT NULL) AND (tags.id IN (1, 2))))), 'f') OR (artists.tag_ids IS NULL))"
+    @c2.exclude(:a_artists=>[@c1.load(:id=>7, :tag_ids=>Sequel.pg_array([3, 4])), @c1.load(:id=>8, :tag_ids=>Sequel.pg_array([4, 5]))]).sql.must_equal "SELECT * FROM tags WHERE ((tags.id NOT IN (SELECT unnest(artists.tag_ids) FROM artists WHERE ((name = 'A') AND (artists.tag_ids IS NOT NULL) AND (artists.id IN (7, 8))))) OR (tags.id IS NULL))"
   end
 
   it "should allowing filtering/excluding associations with NULL or empty values" do
-    @c1.filter(:tags=>@c2.new).sql.must_equal 'SELECT * FROM artists WHERE false'
-    @c1.exclude(:tags=>@c2.new).sql.must_equal 'SELECT * FROM artists WHERE true'
-    @c2.filter(:artists=>@c1.new).sql.must_equal 'SELECT * FROM tags WHERE false'
-    @c2.exclude(:artists=>@c1.new).sql.must_equal 'SELECT * FROM tags WHERE true'
+    @c1.filter(:tags=>@c2.new).sql.must_equal 'SELECT * FROM artists WHERE \'f\''
+    @c1.exclude(:tags=>@c2.new).sql.must_equal 'SELECT * FROM artists WHERE \'t\''
+    @c2.filter(:artists=>@c1.new).sql.must_equal 'SELECT * FROM tags WHERE \'f\''
+    @c2.exclude(:artists=>@c1.new).sql.must_equal 'SELECT * FROM tags WHERE \'t\''
 
-    @c2.filter(:artists=>@c1.load(:tag_ids=>[])).sql.must_equal 'SELECT * FROM tags WHERE false'
-    @c2.exclude(:artists=>@c1.load(:tag_ids=>[])).sql.must_equal 'SELECT * FROM tags WHERE true'
+    @c2.filter(:artists=>@c1.load(:tag_ids=>[])).sql.must_equal 'SELECT * FROM tags WHERE \'f\''
+    @c2.exclude(:artists=>@c1.load(:tag_ids=>[])).sql.must_equal 'SELECT * FROM tags WHERE \'t\''
 
     @c1.filter(:tags=>[@c2.new, @c2.load(:id=>2)]).sql.must_equal "SELECT * FROM artists WHERE (artists.tag_ids && ARRAY[2]::integer[])"
     @c2.filter(:artists=>[@c1.load(:tag_ids=>Sequel.pg_array([3, 4])), @c1.new]).sql.must_equal "SELECT * FROM tags WHERE (tags.id IN (3, 4))"
   end
 
   it "should allowing filtering by association datasets" do
-    @c1.filter(:tags=>@c2.where(:id=>1)).sql.must_equal "SELECT * FROM artists WHERE coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE (id = 1))), false)"
-    @c2.filter(:artists=>@c1.where(:id=>1)).sql.must_equal "SELECT * FROM tags WHERE (EXISTS (SELECT 1 FROM (SELECT artists.tag_ids AS key FROM artists WHERE (id = 1)) AS t1 WHERE (tags.id = any(key))))"
+    @c1.filter(:tags=>@c2.where(:id=>1)).sql.must_equal "SELECT * FROM artists WHERE coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE (id = 1))), 'f')"
+    @c2.filter(:artists=>@c1.where(:id=>1)).sql.must_equal "SELECT * FROM tags WHERE (tags.id IN (SELECT unnest(artists.tag_ids) FROM artists WHERE (id = 1)))"
   end
 
   it "should allowing filtering by association datasets with :conditions" do
-    @c1.filter(:a_tags=>@c2.where(:id=>1)).sql.must_equal "SELECT * FROM artists WHERE coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE ((name = 'A') AND (tags.id IS NOT NULL) AND (tags.id IN (SELECT tags.id FROM tags WHERE (id = 1)))))), false)"
-    @c2.filter(:a_artists=>@c1.where(:id=>1)).sql.must_equal "SELECT * FROM tags WHERE (tags.id IN (SELECT _smtopgaa_key_ FROM artists CROSS JOIN unnest(artists.tag_ids) AS _smtopgaa_(_smtopgaa_key_) WHERE ((name = 'A') AND (artists.tag_ids IS NOT NULL) AND (artists.id IN (SELECT artists.id FROM artists WHERE (id = 1))))))"
+    @c1.filter(:a_tags=>@c2.where(:id=>1)).sql.must_equal "SELECT * FROM artists WHERE coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE ((name = 'A') AND (tags.id IS NOT NULL) AND (tags.id IN (SELECT tags.id FROM tags WHERE (id = 1)))))), 'f')"
+    @c2.filter(:a_artists=>@c1.where(:id=>1)).sql.must_equal "SELECT * FROM tags WHERE (tags.id IN (SELECT unnest(artists.tag_ids) FROM artists WHERE ((name = 'A') AND (artists.tag_ids IS NOT NULL) AND (artists.id IN (SELECT artists.id FROM artists WHERE (id = 1))))))"
   end
 
   it "should allowing excluding by association datasets" do
-    @c1.exclude(:tags=>@c2.where(:id=>1)).sql.must_equal "SELECT * FROM artists WHERE (NOT coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE (id = 1))), false) OR (artists.tag_ids IS NULL))"
-    @c2.exclude(:artists=>@c1.where(:id=>1)).sql.must_equal "SELECT * FROM tags WHERE (NOT (EXISTS (SELECT 1 FROM (SELECT artists.tag_ids AS key FROM artists WHERE (id = 1)) AS t1 WHERE (tags.id = any(key)))) OR (tags.id IS NULL))"
+    @c1.exclude(:tags=>@c2.where(:id=>1)).sql.must_equal "SELECT * FROM artists WHERE (NOT coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE (id = 1))), 'f') OR (artists.tag_ids IS NULL))"
+    @c2.exclude(:artists=>@c1.where(:id=>1)).sql.must_equal "SELECT * FROM tags WHERE ((tags.id NOT IN (SELECT unnest(artists.tag_ids) FROM artists WHERE (id = 1))) OR (tags.id IS NULL))"
   end
 
   it "should allowing excluding by association datasets with :conditions" do
-    @c1.exclude(:a_tags=>@c2.where(:id=>1)).sql.must_equal "SELECT * FROM artists WHERE (NOT coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE ((name = 'A') AND (tags.id IS NOT NULL) AND (tags.id IN (SELECT tags.id FROM tags WHERE (id = 1)))))), false) OR (artists.tag_ids IS NULL))"
-    @c2.exclude(:a_artists=>@c1.where(:id=>1)).sql.must_equal "SELECT * FROM tags WHERE ((tags.id NOT IN (SELECT _smtopgaa_key_ FROM artists CROSS JOIN unnest(artists.tag_ids) AS _smtopgaa_(_smtopgaa_key_) WHERE ((name = 'A') AND (artists.tag_ids IS NOT NULL) AND (artists.id IN (SELECT artists.id FROM artists WHERE (id = 1)))))) OR (tags.id IS NULL))"
+    @c1.exclude(:a_tags=>@c2.where(:id=>1)).sql.must_equal "SELECT * FROM artists WHERE (NOT coalesce((artists.tag_ids && (SELECT array_agg(tags.id) FROM tags WHERE ((name = 'A') AND (tags.id IS NOT NULL) AND (tags.id IN (SELECT tags.id FROM tags WHERE (id = 1)))))), 'f') OR (artists.tag_ids IS NULL))"
+    @c2.exclude(:a_artists=>@c1.where(:id=>1)).sql.must_equal "SELECT * FROM tags WHERE ((tags.id NOT IN (SELECT unnest(artists.tag_ids) FROM artists WHERE ((name = 'A') AND (artists.tag_ids IS NOT NULL) AND (artists.id IN (SELECT artists.id FROM artists WHERE (id = 1)))))) OR (tags.id IS NULL))"
   end
 
   it "filter by associations should respect key options" do 
@@ -145,8 +144,8 @@ describe Sequel::Model, "pg_array_associations" do
 
     @c1.filter(:tags=>@o2).sql.must_equal "SELECT * FROM artists WHERE (artists.tag_ids[1:2] @> ARRAY[6]::integer[])"
     @c2.filter(:artists=>@o1).sql.must_equal "SELECT * FROM tags WHERE ((tags.id * 3) IN (3, 6, 9))"
-    @c1.filter(:tags=>@c2.where(:id=>1)).sql.must_equal "SELECT * FROM artists WHERE coalesce((artists.tag_ids[1:2] && (SELECT array_agg((tags.id * 3)) FROM tags WHERE (id = 1))), false)"
-    @c2.filter(:artists=>@c1.where(:id=>1)).sql.must_equal "SELECT * FROM tags WHERE (EXISTS (SELECT 1 FROM (SELECT artists.tag_ids[1:2] AS key FROM artists WHERE (id = 1)) AS t1 WHERE ((tags.id * 3) = any(key))))"
+    @c1.filter(:tags=>@c2.where(:id=>1)).sql.must_equal "SELECT * FROM artists WHERE coalesce((artists.tag_ids[1:2] && (SELECT array_agg((tags.id * 3)) FROM tags WHERE (id = 1))), 'f')"
+    @c2.filter(:artists=>@c1.where(:id=>1)).sql.must_equal "SELECT * FROM tags WHERE ((tags.id * 3) IN (SELECT unnest(artists.tag_ids[1:2]) FROM artists WHERE (id = 1)))"
   end
   
   it "should raise an error if associated model does not have a primary key, and :primary_key is not specified" do
@@ -224,8 +223,8 @@ describe Sequel::Model, "pg_array_associations" do
   it "should support a :uniq option that removes duplicates from the association" do
     @c1.pg_array_to_many :tags, :clone=>:tags, :uniq=>true
     @c2.many_to_pg_array :artists, :clone=>:artists, :uniq=>true
-    @c1.dataset = @c1.dataset.with_fetch([{:id=>20}, {:id=>30}, {:id=>20}, {:id=>30}])
-    @c2.dataset = @c1.dataset.with_fetch([{:id=>20}, {:id=>30}, {:id=>20}, {:id=>30}])
+    @c1.dataset._fetch = [{:id=>20}, {:id=>30}, {:id=>20}, {:id=>30}]
+    @c2.dataset._fetch = [{:id=>20}, {:id=>30}, {:id=>20}, {:id=>30}]
     @o1.tags.must_equal [@c2.load(:id=>20), @c2.load(:id=>30)]
     @o2.artists.must_equal [@c1.load(:id=>20), @c1.load(:id=>30)]
   end
@@ -248,8 +247,9 @@ describe Sequel::Model, "pg_array_associations" do
   it "should eagerly load correctly" do
     a = @c1.eager(:tags).all
     a.must_equal [@o1]
-    @db.sqls.must_equal ["SELECT * FROM artists",
-      'SELECT * FROM tags WHERE (tags.id IN (1, 2, 3))']
+    sqls = @db.sqls
+    sqls.pop.must_match(/SELECT \* FROM tags WHERE \(tags\.id IN \([123], [123], [123]\)\)/)
+    sqls.must_equal ["SELECT * FROM artists"]
     a.first.tags.must_equal [@o2]
     @db.sqls.must_equal []
 
@@ -267,8 +267,9 @@ describe Sequel::Model, "pg_array_associations" do
 
     a = @c1.eager(:tags).all
     a.must_equal [@o1]
-    @db.sqls.must_equal ["SELECT * FROM artists",
-      'SELECT * FROM tags WHERE ((tags.id * 3) IN (3, 6, 9))']
+    sqls = @db.sqls
+    sqls.pop.must_match(/SELECT \* FROM tags WHERE \(\(tags\.id \* 3\) IN \([369], [369], [369]\)\)/)
+    sqls.must_equal ["SELECT * FROM artists"]
     a.first.tags.must_equal [@o2]
     @db.sqls.must_equal []
 
@@ -282,9 +283,9 @@ describe Sequel::Model, "pg_array_associations" do
   it "should allow cascading of eager loading for associations of associated models" do
     a = @c1.eager(:tags=>:artists).all
     a.must_equal [@o1]
-    @db.sqls.must_equal ["SELECT * FROM artists",
-      'SELECT * FROM tags WHERE (tags.id IN (1, 2, 3))',
-      "SELECT * FROM artists WHERE (artists.tag_ids && ARRAY[2]::integer[])"]
+    sqls = @db.sqls
+    sqls.slice!(1).must_match(/SELECT \* FROM tags WHERE \(tags\.id IN \([123], [123], [123]\)\)/)
+    sqls.must_equal ['SELECT * FROM artists', "SELECT * FROM artists WHERE (artists.tag_ids && ARRAY[2]::integer[])"]
     a.first.tags.must_equal [@o2]
     a.first.tags.first.artists.must_equal [@o1]
     @db.sqls.must_equal []
@@ -300,8 +301,9 @@ describe Sequel::Model, "pg_array_associations" do
     @db.sqls.must_equal []
 
     @o2.artists2.must_equal [@o1]
-    @db.sqls.must_equal ["SELECT * FROM artists WHERE (artists.tag_ids @> ARRAY[2]::integer[])",
-      'SELECT * FROM tags WHERE (tags.id IN (1, 2, 3))']
+    sqls = @db.sqls
+    sqls.pop.must_match(/SELECT \* FROM tags WHERE \(tags\.id IN \([123], [123], [123]\)\)/)
+    sqls.must_equal ["SELECT * FROM artists WHERE (artists.tag_ids @> ARRAY[2]::integer[])"]
     @o2.artists2.first.tags.must_equal [@o2]
     @db.sqls.must_equal []
   end
@@ -310,12 +312,11 @@ describe Sequel::Model, "pg_array_associations" do
     @c1.pg_array_to_many :tags2, :clone=>:tags, :eager_graph=>:artists, :key=>:tag_ids
     @c2.many_to_pg_array :artists2, :clone=>:artists, :eager_graph=>:tags
 
-    @c2.dataset = @c2.dataset.with_fetch(:id=>2, :artists_id=>1, :tag_ids=>Sequel.pg_array([1,2,3]))
-    @c1.dataset = @c1.dataset.with_fetch(:id=>1, :tags_id=>2, :tag_ids=>Sequel.pg_array([1,2,3]))
-    @db.sqls
+    @c2.dataset._fetch = {:id=>2, :artists_id=>1, :tag_ids=>Sequel.pg_array([1,2,3])}
+    @c1.dataset._fetch = {:id=>1, :tags_id=>2, :tag_ids=>Sequel.pg_array([1,2,3])}
 
     @o1.tags2.must_equal [@o2]
-    @db.sqls.must_equal ['SELECT tags.id, artists.id AS artists_id, artists.tag_ids FROM tags LEFT OUTER JOIN artists ON (artists.tag_ids @> ARRAY[tags.id]) WHERE (tags.id IN (1, 2, 3))']
+    @db.sqls.first.must_match(/SELECT tags\.id, artists\.id AS artists_id, artists\.tag_ids FROM tags LEFT OUTER JOIN artists ON \(artists.tag_ids @> ARRAY\[tags.id\]\) WHERE \(tags\.id IN \([123], [123], [123]\)\)/)
     @o1.tags2.first.artists.must_equal [@o1]
     @db.sqls.must_equal []
 
@@ -324,21 +325,20 @@ describe Sequel::Model, "pg_array_associations" do
     @o2.artists2.first.tags.must_equal [@o2]
     @db.sqls.must_equal []
 
-    @c2.dataset = @c2.dataset.with_fetch(:id=>2, :artists_id=>1, :tag_ids=>Sequel.pg_array([1,2,3]))
-    @c1.dataset = @c1.dataset.with_fetch(:id=>1, :tag_ids=>Sequel.pg_array([1,2,3]))
-    @db.sqls
+    @c2.dataset._fetch = {:id=>2, :artists_id=>1, :tag_ids=>Sequel.pg_array([1,2,3])}
+    @c1.dataset._fetch = {:id=>1, :tag_ids=>Sequel.pg_array([1,2,3])}
 
     a = @c1.eager(:tags2).all
-    @db.sqls.must_equal ["SELECT * FROM artists",
-      'SELECT tags.id, artists.id AS artists_id, artists.tag_ids FROM tags LEFT OUTER JOIN artists ON (artists.tag_ids @> ARRAY[tags.id]) WHERE (tags.id IN (1, 2, 3))']
+    sqls = @db.sqls
+    sqls.pop.must_match(/SELECT tags\.id, artists\.id AS artists_id, artists\.tag_ids FROM tags LEFT OUTER JOIN artists ON \(artists.tag_ids @> ARRAY\[tags.id\]\) WHERE \(tags\.id IN \([123], [123], [123]\)\)/)
+    sqls.must_equal ["SELECT * FROM artists"]
     a.must_equal [@o1]
     a.first.tags2.must_equal [@o2]
     a.first.tags2.first.artists.must_equal [@o1]
     @db.sqls.must_equal []
 
-    @c2.dataset = @c2.dataset.with_fetch(:id=>2)
-    @c1.dataset = @c1.dataset.with_fetch(:id=>1, :tags_id=>2, :tag_ids=>Sequel.pg_array([1,2,3]))
-    @db.sqls
+    @c2.dataset._fetch = {:id=>2}
+    @c1.dataset._fetch = {:id=>1, :tags_id=>2, :tag_ids=>Sequel.pg_array([1,2,3])}
 
     a = @c2.eager(:artists2).all
     @db.sqls.must_equal ["SELECT * FROM tags", "SELECT artists.id, artists.tag_ids, tags.id AS tags_id FROM artists LEFT OUTER JOIN tags ON (artists.tag_ids @> ARRAY[tags.id]) WHERE (artists.tag_ids && ARRAY[2]::integer[])"]
@@ -349,36 +349,37 @@ describe Sequel::Model, "pg_array_associations" do
   end
   
   it "should respect the :limit option when eager loading" do
-    @c2.dataset = @c2.dataset.with_fetch([{:id=>1},{:id=>2}, {:id=>3}])
-    @db.sqls
+    @c2.dataset._fetch = [{:id=>1},{:id=>2}, {:id=>3}]
 
     @c1.pg_array_to_many :tags, :clone=>:tags, :limit=>2
     a = @c1.eager(:tags).all
     a.must_equal [@o1]
-    @db.sqls.must_equal ["SELECT * FROM artists",
-      'SELECT * FROM tags WHERE (tags.id IN (1, 2, 3))']
+    sqls = @db.sqls
+    sqls.pop.must_match(/SELECT \* FROM tags WHERE \(tags\.id IN \([123], [123], [123]\)\)/)
+    sqls.must_equal ["SELECT * FROM artists"]
     a.first.tags.must_equal [@c2.load(:id=>1), @c2.load(:id=>2)]
     @db.sqls.must_equal []
 
     @c1.pg_array_to_many :tags, :clone=>:tags, :limit=>[1, 1]
     a = @c1.eager(:tags).all
     a.must_equal [@o1]
-    @db.sqls.must_equal ["SELECT * FROM artists",
-      'SELECT * FROM tags WHERE (tags.id IN (1, 2, 3))']
+    sqls = @db.sqls
+    sqls.pop.must_match(/SELECT \* FROM tags WHERE \(tags\.id IN \([123], [123], [123]\)\)/)
+    sqls.must_equal ["SELECT * FROM artists"]
     a.first.tags.must_equal [@c2.load(:id=>2)]
     @db.sqls.must_equal []
 
     @c1.pg_array_to_many :tags, :clone=>:tags, :limit=>[nil, 1]
     a = @c1.eager(:tags).all
     a.must_equal [@o1]
-    @db.sqls.must_equal ["SELECT * FROM artists",
-      'SELECT * FROM tags WHERE (tags.id IN (1, 2, 3))']
+    sqls = @db.sqls
+    sqls.pop.must_match(/SELECT \* FROM tags WHERE \(tags\.id IN \([123], [123], [123]\)\)/)
+    sqls.must_equal ["SELECT * FROM artists"]
     a.first.tags.must_equal [@c2.load(:id=>2), @c2.load(:id=>3)]
     @db.sqls.length.must_equal 0
 
-    @c2.dataset = @c2.dataset.with_fetch(:id=>2)
-    @c1.dataset = @c1.dataset.with_fetch([{:id=>5, :tag_ids=>Sequel.pg_array([1,2,3])},{:id=>6, :tag_ids=>Sequel.pg_array([2,3])}, {:id=>7, :tag_ids=>Sequel.pg_array([1,2])}])
-    @db.sqls
+    @c2.dataset._fetch = [{:id=>2}]
+    @c1.dataset._fetch = [{:id=>5, :tag_ids=>Sequel.pg_array([1,2,3])},{:id=>6, :tag_ids=>Sequel.pg_array([2,3])}, {:id=>7, :tag_ids=>Sequel.pg_array([1,2])}]
 
     @c2.many_to_pg_array :artists, :clone=>:artists, :limit=>2
     a = @c2.eager(:artists).all
@@ -413,9 +414,8 @@ describe Sequel::Model, "pg_array_associations" do
   end
 
   it "should eagerly graph associations" do
-    @c2.dataset = @c2.dataset.with_fetch(:id=>2, :artists_id=>1, :tag_ids=>Sequel.pg_array([1,2,3]))
-    @c1.dataset = @c1.dataset.with_fetch(:id=>1, :tags_id=>2, :tag_ids=>Sequel.pg_array([1,2,3]))
-    @db.sqls
+    @c2.dataset._fetch = {:id=>2, :artists_id=>1, :tag_ids=>Sequel.pg_array([1,2,3])}
+    @c1.dataset._fetch = {:id=>1, :tags_id=>2, :tag_ids=>Sequel.pg_array([1,2,3])}
 
     a = @c1.eager_graph(:tags).all
     @db.sqls.must_equal ["SELECT artists.id, artists.tag_ids, tags.id AS tags_id FROM artists LEFT OUTER JOIN tags ON (artists.tag_ids @> ARRAY[tags.id])"]
@@ -431,9 +431,8 @@ describe Sequel::Model, "pg_array_associations" do
   end
 
   it "should allow cascading of eager graphing for associations of associated models" do
-    @c2.dataset = @c2.dataset.with_fetch(:id=>2, :artists_id=>1, :tag_ids=>Sequel.pg_array([1,2,3]), :tags_0_id=>2)
-    @c1.dataset = @c1.dataset.with_fetch(:id=>1, :tags_id=>2, :tag_ids=>Sequel.pg_array([1,2,3]), :artists_0_id=>1, :artists_0_tag_ids=>Sequel.pg_array([1,2,3]))
-    @db.sqls
+    @c2.dataset._fetch = {:id=>2, :artists_id=>1, :tag_ids=>Sequel.pg_array([1,2,3]), :tags_0_id=>2}
+    @c1.dataset._fetch = {:id=>1, :tags_id=>2, :tag_ids=>Sequel.pg_array([1,2,3]), :artists_0_id=>1, :artists_0_tag_ids=>Sequel.pg_array([1,2,3])}
 
     a = @c1.eager_graph(:tags=>:artists).all
     @db.sqls.must_equal ["SELECT artists.id, artists.tag_ids, tags.id AS tags_id, artists_0.id AS artists_0_id, artists_0.tag_ids AS artists_0_tag_ids FROM artists LEFT OUTER JOIN tags ON (artists.tag_ids @> ARRAY[tags.id]) LEFT OUTER JOIN artists AS artists_0 ON (artists_0.tag_ids @> ARRAY[tags.id])"]
@@ -455,9 +454,8 @@ describe Sequel::Model, "pg_array_associations" do
     @c1.pg_array_to_many :tags, :clone=>:tags, :primary_key=>Sequel.*(:id, 3), :primary_key_method=>:id3, :key=>:tag3_ids, :key_column=>Sequel.pg_array(:tag_ids)[1..2]
     @c2.many_to_pg_array :artists, :clone=>:artists, :primary_key=>:id3, :key=>:tag3_ids, :key_column=>Sequel.pg_array(:tag_ids)[1..2]
 
-    @c2.dataset = @c2.dataset.with_fetch(:id=>2, :artists_id=>1, :tag_ids=>Sequel.pg_array([1,2,3]), :tags_0_id=>2)
-    @c1.dataset = @c1.dataset.with_fetch(:id=>1, :tags_id=>2, :tag_ids=>Sequel.pg_array([1,2,3]), :artists_0_id=>1, :artists_0_tag_ids=>Sequel.pg_array([1,2,3]))
-    @db.sqls
+    @c2.dataset._fetch = {:id=>2, :artists_id=>1, :tag_ids=>Sequel.pg_array([1,2,3]), :tags_0_id=>2}
+    @c1.dataset._fetch = {:id=>1, :tags_id=>2, :tag_ids=>Sequel.pg_array([1,2,3]), :artists_0_id=>1, :artists_0_tag_ids=>Sequel.pg_array([1,2,3])}
 
     a = @c1.eager_graph(:tags).all
     a.must_equal [@o1]
@@ -476,9 +474,8 @@ describe Sequel::Model, "pg_array_associations" do
     @c1.pg_array_to_many :tags, :clone=>:tags, :graph_select=>:id2
     @c2.many_to_pg_array :artists, :clone=>:artists, :graph_select=>:id
 
-    @c2.dataset = @c2.dataset.with_fetch(:id=>2, :artists_id=>1)
-    @c1.dataset = @c1.dataset.with_fetch(:id=>1, :id2=>2, :tag_ids=>Sequel.pg_array([1,2,3]))
-    @db.sqls
+    @c2.dataset._fetch = {:id=>2, :artists_id=>1}
+    @c1.dataset._fetch = {:id=>1, :id2=>2, :tag_ids=>Sequel.pg_array([1,2,3])}
 
     a = @c1.eager_graph(:tags).all
     @db.sqls.must_equal ["SELECT artists.id, artists.tag_ids, tags.id2 FROM artists LEFT OUTER JOIN tags ON (artists.tag_ids @> ARRAY[tags.id])"]
@@ -565,19 +562,7 @@ describe Sequel::Model, "pg_array_associations" do
     @db.sqls.must_equal ["UPDATE artists SET tag_ids = ARRAY[] WHERE (id = 1)"]
 
     @o2.remove_all_artists
-    @db.sqls.must_equal ["UPDATE artists SET tag_ids = array_remove(tag_ids, CAST(2 AS integer)) WHERE (tag_ids @> ARRAY[2]::integer[])"]
-  end
-
-  it "should define a remove_all_ method for removing all associated objects respecting database type" do
-    @c2.many_to_pg_array :artists, :clone=>:artists, :array_type=>:bigint
-    @o1.remove_all_tags
-    @o1.tag_ids.must_equal []
-    @db.sqls.must_equal []
-    @o1.save_changes
-    @db.sqls.must_equal ["UPDATE artists SET tag_ids = ARRAY[] WHERE (id = 1)"]
-
-    @o2.remove_all_artists
-    @db.sqls.must_equal ["UPDATE artists SET tag_ids = array_remove(tag_ids, CAST(2 AS bigint)) WHERE (tag_ids @> ARRAY[2]::bigint[])"]
+    @db.sqls.must_equal ["UPDATE artists SET tag_ids = array_remove(tag_ids, 2) WHERE (tag_ids @> ARRAY[2])"]
   end
 
   it "should allow calling add_ and remove_ methods on new objects for pg_array_to_many associations" do
@@ -621,7 +606,7 @@ describe Sequel::Model, "pg_array_associations" do
 
     v = @c1.load(:id=>1)
     v.remove_tag(@c2.load(:id=>4))
-    v.tag_ids.must_be_nil
+    v.tag_ids.must_equal nil
     @db.sqls.must_equal []
     v.save_changes
     @db.sqls.must_equal []
@@ -631,7 +616,7 @@ describe Sequel::Model, "pg_array_associations" do
 
     v = @c1.load(:id=>1)
     v.remove_all_tags
-    v.tag_ids.must_be_nil
+    v.tag_ids.must_equal nil
     @db.sqls.must_equal []
     v.save_changes
     @db.sqls.must_equal []
@@ -698,7 +683,7 @@ describe Sequel::Model, "pg_array_associations" do
   end
 
   it "should automatically determine the array type by looking at the schema" do
-    @c1.db_schema[:tag_ids][:db_type] = 'int8[]'
+    @c1.db_schema[:tag_ids][:db_type] = 'int8'
     @c2.many_to_pg_array :artists, :clone=>:artists
     @c1.pg_array_to_many :tags, :clone=>:tags, :save_after_modify=>true
     @c2.load(:id=>1).artists_dataset.sql.must_equal 'SELECT * FROM artists WHERE (artists.tag_ids @> ARRAY[1]::int8[])'
@@ -735,68 +720,17 @@ describe Sequel::Model, "pg_array_associations" do
     t = @c2.load(:id=>2)
     def a.validate() errors.add(:id, 'foo') end
     a.associations[:tags] = []
-    a.add_tag(t).must_be_nil
+    a.add_tag(t).must_equal nil
     a.tags.must_equal []
     a.associations[:tags] = [t]
-    a.remove_tag(t).must_be_nil
+    a.remove_tag(t).must_equal nil
     a.tags.must_equal [t]
 
     t.associations[:artists] = []
-    t.add_artist(a).must_be_nil
+    t.add_artist(a).must_equal nil
     t.artists.must_equal []
     t.associations[:artists] = [a]
-    t.remove_artist(a).must_be_nil
+    t.remove_artist(a).must_equal nil
     t.artists.must_equal [a]
-  end
-end
-
-describe "Sequel::Model.finalize_associations" do
-  before do
-    @db = Sequel.mock(:host=>'postgres', :numrows=>1)
-    @db.extend_datasets do
-      def quote_identifiers?; false end
-    end
-    class ::Foo < Sequel::Model(@db)
-      plugin :pg_array_associations
-      many_to_pg_array :items
-    end
-    class ::Item < Sequel::Model(@db)
-      plugin :pg_array_associations
-      pg_array_to_many :foos
-    end
-    [Foo, Item].each(&:finalize_associations)
-    @db.sqls
-  end
-  after do
-    Object.send(:remove_const, :Item)
-    Object.send(:remove_const, :Foo)
-  end
-
-  it "should finalize pg_array_to_many associations" do
-    r = Item.association_reflection(:foos)
-    r[:class].must_equal Foo
-    r[:_dataset].sql.must_equal "SELECT * FROM foos"
-    r[:associated_eager_dataset].sql.must_equal "SELECT * FROM foos"
-    r.fetch(:_eager_limit_strategy).must_be_nil
-    r[:filter_by_associations_conditions_dataset].sql.must_equal "SELECT array_agg(foos.id) FROM foos WHERE (foos.id IS NOT NULL)"
-    r[:predicate_key].must_equal Sequel.qualify(:foos, :id)
-    r[:predicate_keys].must_equal [Sequel.qualify(:foos, :id)]
-    r[:reciprocal].must_equal :items
-    r[:array_type].must_equal :integer
-    r[:primary_key].must_equal :id
-    r[:primary_key_method].must_equal :id
-  end
-
-  it "should finalize many_to_pg_array associations" do
-    r = Foo.association_reflection(:items)
-    r[:class].must_equal Item
-    r[:_dataset].sql.must_equal "SELECT * FROM items"
-    r[:associated_eager_dataset].sql.must_equal  "SELECT * FROM items"
-    r.fetch(:_eager_limit_strategy).must_be_nil
-    r[:filter_by_associations_conditions_dataset].sql.must_equal "SELECT _smtopgaa_key_ FROM items CROSS JOIN unnest(items.foo_ids) AS _smtopgaa_(_smtopgaa_key_) WHERE (items.foo_ids IS NOT NULL)"
-    r[:predicate_key].must_equal Sequel.qualify(:items, :foo_ids)
-    r[:predicate_keys].must_equal [Sequel.qualify(:items, :foo_ids)]
-    r[:reciprocal].must_equal :foos
-    r[:array_type].must_equal :integer
   end
 end

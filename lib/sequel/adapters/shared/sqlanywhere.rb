@@ -2,21 +2,40 @@
 
 module Sequel
   module SqlAnywhere
-    Sequel::Database.set_shared_adapter_scheme(:sqlanywhere, self)
+
+    @convert_smallint_to_bool = true
+
+    class << self
+      # Whether to convert smallint values to bool, false by default.
+      # Can also be overridden per dataset.
+      attr_accessor :convert_smallint_to_bool
+    end
 
     module DatabaseMethods
+      extend Sequel::Database::ResetIdentifierMangling
+
       attr_reader :conversion_procs
 
-      # Set whether to convert smallint type to boolean for this Database instance
-      attr_accessor :convert_smallint_to_bool
+      # Override the default SqlAnywhere.convert_smallint_to_bool setting for this database.
+      attr_writer :convert_smallint_to_bool
 
-      def database_type
-        :sqlanywhere
+      AUTO_INCREMENT = 'IDENTITY'.freeze
+      SQL_BEGIN = "BEGIN TRANSACTION".freeze
+      SQL_COMMIT = "COMMIT TRANSACTION".freeze
+      SQL_ROLLBACK = "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION".freeze
+      TEMPORARY = "GLOBAL TEMPORARY ".freeze
+      SMALLINT_RE = /smallint/i.freeze
+      DECIMAL_TYPE_RE = /numeric/io
+
+      # Whether to convert smallint to boolean arguments for this dataset.
+      # Defaults to the SqlAnywhere module setting.
+      def convert_smallint_to_bool
+        defined?(@convert_smallint_to_bool) ? @convert_smallint_to_bool : (@convert_smallint_to_bool = ::Sequel::SqlAnywhere.convert_smallint_to_bool)
       end
 
-      def freeze
-        @conversion_procs.freeze
-        super
+      # Sysbase Server uses the :sqlanywhere type.
+      def database_type
+        :sqlanywhere
       end
 
       def to_application_timestamp_sa(v)
@@ -25,7 +44,7 @@ module Sequel
 
       # Convert smallint type to boolean if convert_smallint_to_bool is true
       def schema_column_type(db_type)
-        if convert_smallint_to_bool && db_type =~ /smallint/i
+        if convert_smallint_to_bool && db_type =~ SMALLINT_RE
           :boolean
         else
           super
@@ -37,15 +56,15 @@ module Sequel
         im = input_identifier_meth(opts[:dataset])
         metadata_dataset.
          from{sa_describe_query("select * from #{im.call(table)}").as(:a)}.
-         join(Sequel[:syscolumn].as(:b), :table_id=>:base_table_id, :column_id=>:base_column_id).
-         order{a[:column_number]}.
+         join(:syscolumn___b, :table_id=>:base_table_id, :column_id=>:base_column_id).
+         order(:a__column_number).
          map do |row|
           auto_increment = row.delete(:is_autoincrement)
           row[:auto_increment] = auto_increment == 1 || auto_increment == true
           row[:primary_key] = row.delete(:pkey) == 'Y'
-          row[:allow_null] = row[:nulls_allowed].is_a?(Integer) ? row.delete(:nulls_allowed) == 1 : row.delete(:nulls_allowed)
+          row[:allow_null] = row[:nulls_allowed].is_a?(Fixnum) ? row.delete(:nulls_allowed) == 1 : row.delete(:nulls_allowed)
           row[:db_type] = row.delete(:domain_name)
-          row[:type] = if row[:db_type] =~ /numeric/i and (row[:scale].is_a?(Integer) ? row[:scale] == 0 : !row[:scale])
+          row[:type] = if row[:db_type] =~ DECIMAL_TYPE_RE and (row[:scale].is_a?(Fixnum) ? row[:scale] == 0 : !row[:scale])
             :integer
           else
             schema_column_type(row[:db_type])
@@ -58,18 +77,13 @@ module Sequel
       def indexes(table, opts = OPTS)
         m = output_identifier_meth
         im = input_identifier_meth
-        table = table.value if table.is_a?(Sequel::SQL::Identifier)
         indexes = {}
         metadata_dataset.
-         from(Sequel[:dbo][:sysobjects].as(:z)).
-         select{[
-           z[:name].as(:table_name),
-           i[:name].as(:index_name),
-           si[:indextype].as(:type),
-           si[:colnames].as(:columns)]}.
-         join(Sequel[:dbo][:sysindexes].as(:i), :id=>:id).
-         join(Sequel[:sys][:sysindexes].as(:si), :iname=> :name).
-         where{{z[:type] => 'U', :table_name=>im.call(table)}}.
+         from(:dbo__sysobjects___z).
+         select(:z__name___table_name, :i__name___index_name, :si__indextype___type, :si__colnames___columns).
+         join(:dbo__sysindexes___i, :id___i=> :id___z).
+         join(:sys__sysindexes___si, :iname=> :name___i).
+         where(:z__type => 'U', :table_name=>im.call(table)).
          each do |r|
           indexes[m.call(r[:index_name])] =
             {:unique=>(r[:type].downcase=='unique'),
@@ -83,16 +97,11 @@ module Sequel
         im = input_identifier_meth
         fk_indexes = {}
         metadata_dataset.
-         from{sys[:sysforeignkey].as(:fk)}.
-         select{[
-           fk[:role].as(:name),
-           fks[:columns].as(:column_map),
-           si[:indextype].as(:type),
-           si[:colnames].as(:columns),
-           fks[:primary_tname].as(:table_name)]}.
-         join(Sequel[:sys][:sysforeignkeys].as(:fks), :role => :role).
-         join(Sequel[:sys][:sysindexes].as(:si), {:iname => Sequel[:fk][:role]}, {:implicit_qualifier => :fk}).
-         where{{fks[:foreign_tname]=>im.call(table)}}.
+         from(:sys__sysforeignkey___fk).
+         select(:fk__role___name, :fks__columns___column_map, :si__indextype___type, :si__colnames___columns, :fks__primary_tname___table_name).
+         join(:sys__sysforeignkeys___fks, :role => :role).
+         join_table(:inner, :sys__sysindexes___si, [:iname=> :fk__role], {:implicit_qualifier => :fk}).
+         where(:fks__foreign_tname=>im.call(table)).
          each do |r|
           unless r[:type].downcase == 'primary key'
             fk_indexes[r[:name]] =
@@ -129,28 +138,27 @@ module Sequel
 
       # Sybase uses the IDENTITY column for autoincrementing columns.
       def auto_increment_sql
-        'IDENTITY'
+        AUTO_INCREMENT
       end
       
-      # Sybase does not allow adding primary key constraints to NULLable columns.
-      def can_add_primary_key_constraint_on_nullable_columns?
-        false
-      end
-
+      # SQL fragment for marking a table as temporary
       def temporary_table_sql
-        "GLOBAL TEMPORARY "
+        TEMPORARY
       end
 
+      # SQL to BEGIN a transaction.
       def begin_transaction_sql
-        "BEGIN TRANSACTION"
+        SQL_BEGIN
       end
 
+      # SQL to ROLLBACK a transaction.
       def rollback_transaction_sql
-        "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION"
+        SQL_ROLLBACK
       end
 
+      # SQL to COMMIT a transaction.
       def commit_transaction_sql
-        "COMMIT TRANSACTION"
+        SQL_COMMIT
       end
 
       # Sybase has both datetime and timestamp classes, most people are going
@@ -159,6 +167,12 @@ module Sequel
         :datetime
       end
 
+      # Sybase has both datetime and timestamp classes, most people are going
+      # to want datetime
+      def type_literal_generic_time(column)
+        column[:only_time] ? :time : :datetime
+      end
+      
       # Sybase doesn't have a true boolean class, so it uses integer
       def type_literal_generic_trueclass(column)
         :smallint
@@ -169,6 +183,7 @@ module Sequel
         :image
       end
 
+      # Sybase specific syntax for altering tables.
       def alter_table_sql(table, op)
         case op[:op]
         when :add_column
@@ -219,9 +234,9 @@ module Sequel
       def tables_and_views(type, opts=OPTS)
         m = output_identifier_meth
         metadata_dataset.
-          from{sysobjects.as(:a)}.
-          where{{a[:type]=>type}}.
-          select_map{a[:name]}.
+          from(:sysobjects___a).
+          where(:a__type=>type).
+          select_map(:a__name).
           map{|n| m.call(n)}
       end
       
@@ -232,22 +247,42 @@ module Sequel
     end
 
     module DatasetMethods
-      Dataset.def_sql_method(self, :insert, %w'insert into columns values')
-      Dataset.def_sql_method(self, :select, %w'with select distinct limit columns into from join where group having window compounds order lock')
+      BOOL_TRUE = '1'.freeze
+      BOOL_FALSE = '0'.freeze
+      WILDCARD = LiteralString.new('%').freeze
+      TOP = " TOP ".freeze
+      START_AT = " START AT ".freeze
+      SQL_WITH_RECURSIVE = "WITH RECURSIVE ".freeze
+      DATE_FUNCTION = 'today()'.freeze
+      NOW_FUNCTION = 'now()'.freeze
+      DATEPART = 'datepart'.freeze
+      REGEXP = 'REGEXP'.freeze
+      NOT_REGEXP = 'NOT REGEXP'.freeze
+      APOS = Dataset::APOS
+      APOS_RE = Dataset::APOS_RE
+      DOUBLE_APOS = Dataset::DOUBLE_APOS
+      BACKSLASH_RE = /\\/.freeze
+      QUAD_BACKSLASH = "\\\\\\\\".freeze
+      BLOB_START = "0x".freeze
+      HSTAR = "H*".freeze
+      CROSS_APPLY = 'CROSS APPLY'.freeze
+      OUTER_APPLY = 'OUTER APPLY'.freeze
+      ONLY_OFFSET = " TOP 2147483647".freeze
+
+      Dataset.def_sql_method(self, :insert, %w'with insert into columns values')
+      Dataset.def_sql_method(self, :select, %w'with select distinct limit columns into from join where group having order compounds lock')
 
       # Whether to convert smallint to boolean arguments for this dataset.
-      # Defaults to the IBMDB module setting.
+      # Defaults to the SqlAnywhere module setting.
       def convert_smallint_to_bool
-        opts.has_key?(:convert_smallint_to_bool) ? opts[:convert_smallint_to_bool] : db.convert_smallint_to_bool
+        defined?(@convert_smallint_to_bool) ? @convert_smallint_to_bool : (@convert_smallint_to_bool = @db.convert_smallint_to_bool)
       end
 
-      # Return a cloned dataset with the convert_smallint_to_bool option set.
-      def with_convert_smallint_to_bool(v)
-        clone(:convert_smallint_to_bool=>v)
-      end
+      # Override the default SqlAnywhere.convert_smallint_to_bool setting for this dataset.
+      attr_writer :convert_smallint_to_bool
 
       def supports_cte?(type=:select)
-        type == :select
+        type == :select || type == :insert
       end
 
       # SQLAnywhere supports GROUPING SETS
@@ -275,14 +310,6 @@ module Sequel
         false
       end
 
-      def supports_window_clause?
-        true
-      end
-
-      def supports_window_functions?
-        true
-      end
-
       # Uses CROSS APPLY to join the given table into the current dataset.
       def cross_apply(table)
         join_table(:cross_apply, table)
@@ -293,6 +320,7 @@ module Sequel
         true
       end
 
+      # SQLAnywhere uses + for string concatenation, and LIKE is case insensitive by default.
       def complex_expression_sql_append(sql, op, args)
         case op
         when :'||'
@@ -300,12 +328,12 @@ module Sequel
         when :<<, :>>
           complex_expression_emulate_append(sql, op, args)
         when :LIKE, :"NOT LIKE"
-          sql << '('
-          literal_append(sql, args[0])
-          sql << (op == :LIKE ? ' REGEXP ' : ' NOT REGEXP ')
+          sql << Sequel::Dataset::PAREN_OPEN
+          literal_append(sql, args.at(0))
+          sql << Sequel::Dataset::SPACE << (op == :LIKE ? REGEXP : NOT_REGEXP) << Sequel::Dataset::SPACE
           pattern = String.new
           last_c = ''
-          args[1].each_char do |c|
+          args.at(1).each_char do |c|
             if  c == '_' and not pattern.end_with?('\\') and last_c != '\\'
               pattern << '.'
             elsif c == '%' and not pattern.end_with?('\\') and last_c != '\\'
@@ -328,17 +356,17 @@ module Sequel
             end
           end
           literal_append(sql, pattern)
-          sql << " ESCAPE "
-          literal_append(sql, "\\")
-          sql << ')'
+          sql << Sequel::Dataset::ESCAPE
+          literal_append(sql, Sequel::Dataset::BACKSLASH)
+          sql << Sequel::Dataset::PAREN_CLOSE
         when :ILIKE, :"NOT ILIKE"
           super(sql, (op == :ILIKE ? :LIKE : :"NOT LIKE"), args)
         when :extract
-          sql << 'datepart('
-          literal_append(sql, args[0])
+          sql << DATEPART + Sequel::Dataset::PAREN_OPEN
+          literal_append(sql, args.at(0))
           sql << ','
-          literal_append(sql, args[1])
-          sql << ')'
+          literal_append(sql, args.at(1))
+          sql << Sequel::Dataset::PAREN_CLOSE
         else
           super
         end
@@ -349,13 +377,13 @@ module Sequel
         string.gsub(/[\\%_\[]/){|m| "\\#{m}"}
       end
 
-      # Use today() for CURRENT_DATE and now() for CURRENT_TIMESTAMP and CURRENT_TIME
+      # Use Date() and Now() for CURRENT_DATE and CURRENT_TIMESTAMP
       def constant_sql_append(sql, constant)
         case constant
         when :CURRENT_DATE
-          sql << 'today()'
+          sql << DATE_FUNCTION
         when :CURRENT_TIMESTAMP, :CURRENT_TIME
-          sql << 'now()'
+          sql << NOW_FUNCTION
         else
           super
         end
@@ -370,17 +398,17 @@ module Sequel
 
       # Use 1 for true on Sybase
       def literal_true
-        '1'
+        BOOL_TRUE
       end
 
       # Use 0 for false on Sybase
       def literal_false
-        '0'
+        BOOL_FALSE
       end
 
       # SQL fragment for String.  Doubles \ and ' by default.
       def literal_string_append(sql, v)
-        sql << "'" << v.gsub("\\", "\\\\\\\\").gsub("'", "''") << "'"
+        sql << APOS << v.gsub(BACKSLASH_RE, QUAD_BACKSLASH).gsub(APOS_RE, DOUBLE_APOS) << APOS
       end
 
       # SqlAnywhere uses a preceding X for hex escaping strings
@@ -388,7 +416,7 @@ module Sequel
         if v.empty?
           literal_append(sql, "")
         else
-          sql << "0x" << v.unpack("H*").first
+          sql << BLOB_START << v.unpack(HSTAR).first
         end
       end
 
@@ -399,25 +427,26 @@ module Sequel
 
       def select_into_sql(sql)
         if i = @opts[:into]
-          sql << " INTO "
+          sql << Sequel::Dataset::INTO
           identifier_append(sql, i)
         end
       end
 
-      # Sybase uses TOP N for limit.
+      # Sybase uses TOP N for limit.  For Sybase TOP (N) is used
+      # to allow the limit to be a bound variable.
       def select_limit_sql(sql)
         l = @opts[:limit]
         o = @opts[:offset]
         if l || o
           if l
-            sql << " TOP "
+            sql << TOP
             literal_append(sql, l)
           else
-            sql << " TOP 2147483647"
+            sql << ONLY_OFFSET
           end
 
           if o 
-            sql << " START AT ("
+            sql << START_AT + "("
             literal_append(sql, o)
             sql << " + 1)"
           end
@@ -426,15 +455,15 @@ module Sequel
 
       # Use WITH RECURSIVE instead of WITH if any of the CTEs is recursive
       def select_with_sql_base
-        opts[:with].any?{|w| w[:recursive]} ? "WITH RECURSIVE " : super
+        opts[:with].any?{|w| w[:recursive]} ? SQL_WITH_RECURSIVE : super
       end
 
       def join_type_sql(join_type)
         case join_type
         when :cross_apply
-          'CROSS APPLY'
+          CROSS_APPLY
         when :outer_apply
-          'OUTER APPLY'
+          OUTER_APPLY
         else
           super
         end

@@ -13,7 +13,7 @@ module Sequel
     # get the reviews for all of those albums:
     #
     #   Album.plugin :lazy_attributes, :review
-    #   Album.where{id < 100}.all do |a|
+    #   Album.filter{id<100}.all do |a|
     #     a.review
     #   end
     #
@@ -38,12 +38,9 @@ module Sequel
       end
       
       module ClassMethods
-        # Freeze lazy attributes module when freezing model class.
-        def freeze
-          @lazy_attributes_module.freeze if @lazy_attributes_module
-
-          super
-        end
+        # Module to store the lazy attribute getter methods, so they can
+        # be overridden and call super to get the lazy attribute behavior
+        attr_accessor :lazy_attributes_module
 
         # Remove the given attributes from the list of columns selected by default.
         # For each attribute given, create an accessor method that allows a lazy
@@ -62,8 +59,8 @@ module Sequel
         # :dataset :: The base dataset to use for the lazy attribute lookup
         # :table :: The table name to use to qualify the attribute and primary key columns.
         def define_lazy_attribute_getter(a, opts=OPTS)
-          include(@lazy_attributes_module ||= Module.new) unless @lazy_attributes_module
-          @lazy_attributes_module.class_eval do
+          include(self.lazy_attributes_module ||= Module.new) unless lazy_attributes_module
+          lazy_attributes_module.class_eval do
             define_method(a) do
               if !values.has_key?(a) && !new?
                 lazy_attribute_lookup(a, opts)
@@ -83,8 +80,9 @@ module Sequel
         # the attribute for just the current object.  Return the value of
         # the attribute for the current object.
         def lazy_attribute_lookup(a, opts=OPTS)
-          table = opts[:table] || model.table_name
-          selection = Sequel.qualify(table, a)
+          unless table = opts[:table]
+            table = model.table_name
+          end
 
           if base_ds = opts[:dataset]
             ds = base_ds.where(qualified_pk_hash(table))
@@ -93,8 +91,10 @@ module Sequel
             ds = this
           end
 
+          selection = Sequel.qualify(table, a)
+
           if frozen?
-            return ds.get(selection)
+            return ds.dup.get(selection)
           end
 
           if retrieved_with
@@ -103,11 +103,7 @@ module Sequel
             id_map = {}
             retrieved_with.each{|o| id_map[o.pk] = o unless o.values.has_key?(a) || o.frozen?}
             predicate_key = composite_pk ? primary_key.map{|k| Sequel.qualify(table, k)} : Sequel.qualify(table, primary_key)
-            base_ds.
-             select(*(Array(primary_key).map{|k| Sequel.qualify(table, k)} + [selection])).
-             where(predicate_key=>id_map.keys).
-             naked.
-             each do |row|
+            base_ds.select(*(Array(primary_key).map{|k| Sequel.qualify(table, k)} + [selection])).where(predicate_key=>id_map.keys).naked.each do |row|
               obj = id_map[composite_pk ? row.values_at(*primary_key) : row[primary_key]]
               if obj && !obj.values.has_key?(a)
                 obj.values[a] = row[a]

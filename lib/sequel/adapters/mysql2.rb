@@ -1,21 +1,15 @@
 # frozen-string-literal: true
 
 require 'mysql2'
-require_relative 'utils/mysql_mysql2'
+Sequel.require %w'shared/mysql_prepared_statements', 'adapters'
 
 module Sequel
+  # Module for holding all Mysql2-related classes and modules for Sequel.
   module Mysql2
-    NativePreparedStatements = if ::Mysql2::VERSION >= '0.4'
-      true
-    else
-      require_relative 'utils/mysql_prepared_statements'
-      false
-    end
-
+    # Database class for MySQL databases used with Sequel.
     class Database < Sequel::Database
       include Sequel::MySQL::DatabaseMethods
-      include Sequel::MySQL::MysqlMysql2::DatabaseMethods
-      include Sequel::MySQL::PreparedStatements::DatabaseMethods unless NativePreparedStatements
+      include Sequel::MySQL::PreparedStatements::DatabaseMethods
 
       set_adapter_scheme :mysql2
       
@@ -43,10 +37,6 @@ module Sequel
         opts[:encoding] ||= opts[:charset]
         conn = ::Mysql2::Client.new(opts)
         conn.query_options.merge!(:symbolize_keys=>true, :cache_rows=>false)
-          
-        if NativePreparedStatements
-          conn.instance_variable_set(:@sequel_default_query_options, conn.query_options.dup)
-        end
 
         sqls = mysql_connection_setting_sqls
 
@@ -58,23 +48,20 @@ module Sequel
           sqls.unshift("SET NAMES #{conn.escape(encoding.to_s)}")
         end
 
-        sqls.each{|sql| log_connection_yield(sql, conn){conn.query(sql)}}
+        sqls.each{|sql| log_yield(sql){conn.query(sql)}}
 
         add_prepared_statements_cache(conn)
         conn
       end
 
+      # Return the number of matched rows when executing a delete/update statement.
       def execute_dui(sql, opts=OPTS)
         execute(sql, opts){|c| return c.affected_rows}
       end
 
+      # Return the last inserted id when executing an insert statement.
       def execute_insert(sql, opts=OPTS)
         execute(sql, opts){|c| return c.last_id}
-      end
-
-      def freeze
-        server_version
-        super
       end
 
       # Return the version of the MySQL server to which we are connecting.
@@ -84,59 +71,13 @@ module Sequel
 
       private
 
-      if NativePreparedStatements
-        # Use a native mysql2 prepared statement to implement prepared statements.
-        def execute_prepared_statement(ps_name, opts, &block)
-          ps = prepared_statement(ps_name)
-          sql = ps.prepared_sql
-
-          synchronize(opts[:server]) do |conn|
-            stmt, ps_sql = conn.prepared_statements[ps_name]
-            unless ps_sql == sql
-              stmt.close if stmt
-              stmt = log_connection_yield(conn, "Preparing #{ps_name}: #{sql}"){conn.prepare(sql)}
-              conn.prepared_statements[ps_name] = [stmt, sql]
-            end
-
-            if ps.log_sql
-              opts = Hash[opts]
-              opts = opts[:log_sql] = " (#{sql})"
-            end
-
-            _execute(conn, stmt, opts, &block)
-          end
-        end
-      end
-
       # Execute the given SQL on the given connection.  If the :type
       # option is :select, yield the result of the query, otherwise
       # yield the connection if a block is given.
       def _execute(conn, sql, opts)
         begin
           stream = opts[:stream]
-          if NativePreparedStatements
-            if args = opts[:arguments]
-              args = args.map{|arg| bound_variable_value(arg)}
-            end
-
-            case sql
-            when ::Mysql2::Statement
-              stmt = sql
-            when Dataset
-              sql = sql.sql
-              close_stmt = true
-              stmt = conn.prepare(sql)
-            end
-          end
-
-          r = log_connection_yield((log_sql = opts[:log_sql]) ? sql + log_sql : sql, conn, args) do
-            if stmt
-              conn.query_options.merge!(:cache_rows=>true, :database_timezone => timezone, :application_timezone => Sequel.application_timezone, :stream=>stream, :cast_booleans=>convert_tinyint_to_bool)
-              stmt.execute(*args)
-            else
-              conn.query(sql, :database_timezone => timezone, :application_timezone => Sequel.application_timezone, :stream=>stream)
-            end
-          end
+          r = log_yield((log_sql = opts[:log_sql]) ? sql + log_sql : sql){conn.query(sql, :database_timezone => timezone, :application_timezone => Sequel.application_timezone, :stream=>stream)}
           if opts[:type] == :select
             if r
               if stream
@@ -157,50 +98,26 @@ module Sequel
           end
         rescue ::Mysql2::Error => e
           raise_error(e)
-        ensure
-          if stmt
-            conn.query_options.replace(conn.instance_variable_get(:@sequel_default_query_options))
-            stmt.close if close_stmt
-          end
         end
       end
 
       # Set the convert_tinyint_to_bool setting based on the default value.
       def adapter_initialize
-        self.convert_tinyint_to_bool = true
+        self.convert_tinyint_to_bool = Sequel::MySQL.convert_tinyint_to_bool
       end
 
-      if NativePreparedStatements
-        # Handle bound variable arguments that Mysql2 does not handle natively.
-        def bound_variable_value(arg)
-          case arg
-          when true
-            1
-          when false
-            0
-          when DateTime, Time
-            literal(arg)[1...-1]
-          else
-            arg
-          end
-        end
-      end
-
+      # MySQL connections use the query method to execute SQL without a result
       def connection_execute_method
         :query
       end
 
+      # The MySQL adapter main error class is Mysql2::Error
       def database_error_classes
         [::Mysql2::Error]
       end
 
       def database_exception_sqlstate(exception, opts)
-        state = exception.sql_state
-        state unless state == 'HY000'
-      end
-
-      def dataset_class_default
-        Dataset
+        exception.sql_state
       end
 
       # If a connection object is available, try pinging it.  Otherwise, if the
@@ -214,37 +131,42 @@ module Sequel
              MYSQL_DATABASE_DISCONNECT_ERRORS.match(e.message)))
       end
 
+      # The database name when using the native adapter is always stored in
+      # the :database option.
+      def database_name
+        @opts[:database]
+      end
+
       # Convert tinyint(1) type to boolean if convert_tinyint_to_bool is true
       def schema_column_type(db_type)
         convert_tinyint_to_bool && db_type =~ /\Atinyint\(1\)/ ? :boolean : super
       end
     end
 
+    # Dataset class for MySQL datasets accessed via the native driver.
     class Dataset < Sequel::Dataset
       include Sequel::MySQL::DatasetMethods
-      include Sequel::MySQL::MysqlMysql2::DatasetMethods
-      include Sequel::MySQL::PreparedStatements::DatasetMethods unless NativePreparedStatements
+      include Sequel::MySQL::PreparedStatements::DatasetMethods
       STREAMING_SUPPORTED = ::Mysql2::VERSION >= '0.3.12'
 
-      if NativePreparedStatements
-        PreparedStatementMethods = prepared_statements_module(
-          "sql = self; opts = Hash[opts]; opts[:arguments] = bind_arguments",
-          Sequel::Dataset::UnnumberedArgumentMapper,
-          %w"execute execute_dui execute_insert")
-      end
+      Database::DatasetClass = self
 
+      # Yield all rows matching this dataset.
       def fetch_rows(sql)
         execute(sql) do |r|
-          self.columns = r.fields.map!{|c| output_identifier(c.to_s)}
+          @columns = if identifier_output_method
+            r.fields.map!{|c| output_identifier(c.to_s)}
+          else
+            r.fields
+          end
           r.each(:cast_booleans=>convert_tinyint_to_bool?){|h| yield h}
         end
         self
       end
 
-      # Use streaming to implement paging if Mysql2 supports it and
-      # it hasn't been disabled.
+      # Use streaming to implement paging if Mysql2 supports it.
       def paged_each(opts=OPTS, &block)
-        if STREAMING_SUPPORTED && opts[:stream] != false
+        if STREAMING_SUPPORTED
           stream.each(&block)
         else
           super
@@ -261,12 +183,13 @@ module Sequel
       private
 
       # Whether to cast tinyint(1) columns to integer instead of boolean.
-      # By default, uses the database's convert_tinyint_to_bool
+      # By default, uses the opposite of the database's convert_tinyint_to_bool
       # setting.  Exists for compatibility with the mysql adapter.
       def convert_tinyint_to_bool?
         @db.convert_tinyint_to_bool
       end
 
+      # Set the :type option to :select if it hasn't been set.
       def execute(sql, opts=OPTS)
         opts = Hash[opts]
         opts[:type] = :select
@@ -274,19 +197,9 @@ module Sequel
         super
       end
 
-      if NativePreparedStatements
-        def bound_variable_modules
-          [PreparedStatementMethods]
-        end
-
-        def prepared_statement_modules
-          [PreparedStatementMethods]
-        end
-      end
-
       # Handle correct quoting of strings using ::Mysql2::Client#escape.
       def literal_string_append(sql, v)
-        sql << "'" << db.synchronize(@opts[:server]){|c| c.escape(v)} << "'"
+        sql << APOS << db.synchronize(@opts[:server]){|c| c.escape(v)} << APOS
       end
     end
   end

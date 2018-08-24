@@ -40,27 +40,15 @@
 # If you specify the range database type, Sequel will automatically cast
 # the value to that type when literalizing.
 #
-# To use this extension, load it into the Database instance:
+# If you would like to use range columns in your model objects, you
+# probably want to modify the schema parsing/typecasting so that it
+# recognizes and correctly handles the range type columns, which you can
+# do by:
 #
 #   DB.extension :pg_range
 #
 # See the {schema modification guide}[rdoc-ref:doc/schema_modification.rdoc]
 # for details on using range type columns in CREATE/ALTER TABLE statements.
-#
-# This extension makes it easy to add support for other range types.  In
-# general, you just need to make sure that the subtype is handled and has the
-# appropriate converter installed.  For user defined
-# types, you can do this via:
-#
-#   DB.add_conversion_proc(subtype_oid){|string| }
-#
-# Then you can call
-# Sequel::Postgres::PGRange::DatabaseMethods#register_range_type
-# to automatically set up a handler for the range type.  So if you
-# want to support the timerange type (assuming the time type is already
-# supported):
-#
-#   DB.register_range_type('timerange')
 #
 # This extension integrates with the pg_array extension.  If you plan
 # to use arrays of range types, load the pg_array extension before the
@@ -70,13 +58,80 @@
 #
 # Related module: Sequel::Postgres::PGRange
 
+Sequel.require 'adapters/utils/pg_types'
+
 module Sequel
   module Postgres
     class PGRange
       include Sequel::SQL::AliasMethods
 
+      # Map of string database type names to type symbols (e.g. 'int4range' => :int4range),
+      # used in the schema parsing.
+      RANGE_TYPES = {}
+
+      EMPTY = 'empty'.freeze
+      EMPTY_STRING = ''.freeze
+      COMMA = ','.freeze
+      QUOTED_EMPTY_STRING = '""'.freeze
+      OPEN_PAREN = "(".freeze
+      CLOSE_PAREN = ")".freeze
+      OPEN_BRACKET = "[".freeze
+      CLOSE_BRACKET = "]".freeze
+      ESCAPE_RE = /("|,|\\|\[|\]|\(|\))/.freeze
+      ESCAPE_REPLACE = '\\\\\1'.freeze
+      CAST = '::'.freeze
+
+      # Registers a range type that the extension should handle.  Makes a Database instance that
+      # has been extended with DatabaseMethods recognize the range type given and set up the
+      # appropriate typecasting.  Also sets up automatic typecasting for the native postgres
+      # adapter, so that on retrieval, the values are automatically converted to PGRange instances.
+      # The db_type argument should be the name of the range type. Accepts the following options:
+      #
+      # :converter :: A callable object (e.g. Proc), that is called with the start or end of the range
+      #               (usually a string), and should return the appropriate typecasted object.
+      # :oid :: The PostgreSQL OID for the range type.  This is used by the Sequel postgres adapter
+      #         to set up automatic type conversion on retrieval from the database.
+      # :subtype_oid :: Should be the PostgreSQL OID for the range's subtype. If given,
+      #                 automatically sets the :converter option by looking for scalar conversion
+      #                 proc.
+      #
+      # If a block is given, it is treated as the :converter option.
+      def self.register(db_type, opts=OPTS, &block)
+        db_type = db_type.to_s.dup.freeze
+
+        if converter = opts[:converter]
+          raise Error, "can't provide both a block and :converter option to register" if block
+        else
+          converter = block
+        end
+
+        if soid = opts[:subtype_oid]
+          raise Error, "can't provide both a converter and :scalar_oid option to register" if converter 
+          raise Error, "no conversion proc for :scalar_oid=>#{soid.inspect} in PG_TYPES" unless converter = PG_TYPES[soid]
+        end
+
+        parser = Parser.new(db_type, converter)
+
+        RANGE_TYPES[db_type] = db_type.to_sym
+
+        DatabaseMethods.define_range_typecast_method(db_type, parser)
+
+        if oid = opts[:oid]
+          Sequel::Postgres::PG_TYPES[oid] = parser
+        end
+
+        nil
+      end
+
       # Creates callable objects that convert strings into PGRange instances.
       class Parser
+        # Regexp that parses the full range of PostgreSQL range type output,
+        # except for empty ranges.
+        PARSER = /\A(\[|\()("((?:\\"|[^"])*)"|[^"]*),("((?:\\"|[^"])*)"|[^"]*)(\]|\))\z/o
+
+        REPLACE_RE = /\\(.)/.freeze
+        REPLACE_WITH = '\1'.freeze
+
         # The database range type for this parser (e.g. 'int4range'),
         # automatically setting the db_type for the returned PGRange instances.
         attr_reader :db_type
@@ -93,11 +148,11 @@ module Sequel
 
         # Parse the range type input string into a PGRange value.
         def call(string)
-          if string == 'empty'
+          if string == EMPTY
             return PGRange.empty(db_type)
           end
 
-          raise(InvalidValue, "invalid or unhandled range format: #{string.inspect}") unless matches = /\A(\[|\()("((?:\\"|[^"])*)"|[^"]*),("((?:\\"|[^"])*)"|[^"]*)(\]|\))\z/.match(string)
+          raise(InvalidValue, "invalid or unhandled range format: #{string.inspect}") unless matches = PARSER.match(string)
 
           exclude_begin = matches[1] == '('
           exclude_end = matches[6] == ')'
@@ -111,12 +166,12 @@ module Sequel
           # to always use the quoted output form when characters need to be escaped, so
           # there isn't a need to unescape unquoted output.
           if beg = matches[3]
-            beg.gsub!(/\\(.)/, '\1')
+            beg.gsub!(REPLACE_RE, REPLACE_WITH)
           else
             beg = matches[2] unless matches[2].empty?
           end
           if en = matches[5]
-            en.gsub!(/\\(.)/, '\1')
+            en.gsub!(REPLACE_RE, REPLACE_WITH)
           else
             en = matches[4] unless matches[4].empty?
           end
@@ -131,38 +186,33 @@ module Sequel
       end
 
       module DatabaseMethods
-        # Add the conversion procs to the database
+        # Reset the conversion procs if using the native postgres adapter,
         # and extend the datasets to correctly literalize ruby Range values.
         def self.extended(db)
-          db.instance_exec do
-            @pg_range_schema_types ||= {}
+          db.instance_eval do
             extend_datasets(DatasetMethods)
-            register_range_type('int4range', :oid=>3904, :subtype_oid=>23)
-            register_range_type('numrange', :oid=>3906, :subtype_oid=>1700)
-            register_range_type('tsrange', :oid=>3908, :subtype_oid=>1114)
-            register_range_type('tstzrange', :oid=>3910, :subtype_oid=>1184)
-            register_range_type('daterange', :oid=>3912, :subtype_oid=>1082)
-            register_range_type('int8range', :oid=>3926, :subtype_oid=>20)
-            if respond_to?(:register_array_type)
-              register_array_type('int4range', :oid=>3905, :scalar_oid=>3904, :scalar_typecast=>:int4range)
-              register_array_type('numrange', :oid=>3907, :scalar_oid=>3906, :scalar_typecast=>:numrange)
-              register_array_type('tsrange', :oid=>3909, :scalar_oid=>3908, :scalar_typecast=>:tsrange)
-              register_array_type('tstzrange', :oid=>3911, :scalar_oid=>3910, :scalar_typecast=>:tstzrange)
-              register_array_type('daterange', :oid=>3913, :scalar_oid=>3912, :scalar_typecast=>:daterange)
-              register_array_type('int8range', :oid=>3927, :scalar_oid=>3926, :scalar_typecast=>:int8range)
-            end
+            copy_conversion_procs([3904, 3906, 3912, 3926, 3905, 3907, 3913, 3927])
             [:int4range, :numrange, :tsrange, :tstzrange, :daterange, :int8range].each do |v|
               @schema_type_classes[v] = PGRange
             end
-
-            procs = conversion_procs
-            add_conversion_proc(3908, Parser.new("tsrange", procs[1114]))
-            add_conversion_proc(3910, Parser.new("tstzrange", procs[1184]))
-            if defined?(PGArray::Creator)
-              add_conversion_proc(3909, PGArray::Creator.new("tsrange", procs[3908]))
-              add_conversion_proc(3911, PGArray::Creator.new("tstzrange", procs[3910]))
-            end
           end
+
+          procs = db.conversion_procs
+          procs[3908] = Parser.new("tsrange", procs[1114])
+          procs[3910] = Parser.new("tstzrange", procs[1184])
+          if defined?(PGArray::Creator)
+            procs[3909] = PGArray::Creator.new("tsrange", procs[3908])
+            procs[3911] = PGArray::Creator.new("tstzrange", procs[3910])
+          end
+
+        end
+
+        # Define a private range typecasting method for the given type that uses
+        # the parser argument to do the type conversion.
+        def self.define_range_typecast_method(type, parser)
+          meth = :"typecast_value_#{type}"
+          define_method(meth){|v| typecast_value_pg_range(v, parser)}
+          private meth
         end
 
         # Handle Range and PGRange values in bound variables
@@ -177,70 +227,6 @@ module Sequel
           end
         end
 
-        # Freeze the pg range schema types to prevent adding new ones.
-        def freeze
-          @pg_range_schema_types.freeze
-          super
-        end
-
-        # Register a database specific range type.  This can be used to support
-        # different range types per Database.  Options:
-        #
-        # :converter :: A callable object (e.g. Proc), that is called with the start or end of the range
-        #               (usually a string), and should return the appropriate typecasted object.
-        # :oid :: The PostgreSQL OID for the range type.  This is used by the Sequel postgres adapter
-        #         to set up automatic type conversion on retrieval from the database.
-        # :subtype_oid :: Should be the PostgreSQL OID for the range's subtype. If given,
-        #                 automatically sets the :converter option by looking for scalar conversion
-        #                 proc.
-        #
-        # If a block is given, it is treated as the :converter option.
-        def register_range_type(db_type, opts=OPTS, &block)
-          oid = opts[:oid]
-          soid = opts[:subtype_oid]
-
-          if has_converter = opts.has_key?(:converter)
-            raise Error, "can't provide both a block and :converter option to register_range_type" if block
-            converter = opts[:converter]
-          else
-            has_converter = true if block
-            converter = block
-          end
-
-          unless (soid || has_converter) && oid
-            range_oid, subtype_oid = from(:pg_range).join(:pg_type, :oid=>:rngtypid).where(:typname=>db_type.to_s).get([:rngtypid, :rngsubtype])
-            soid ||= subtype_oid unless has_converter
-            oid ||= range_oid
-          end
-
-          db_type = db_type.to_s.dup.freeze
-
-          if converter = opts[:converter]
-            raise Error, "can't provide both a block and :converter option to register" if block
-          else
-            converter = block
-          end
-
-          if soid
-            raise Error, "can't provide both a converter and :subtype_oid option to register" if has_converter 
-            raise Error, "no conversion proc for :subtype_oid=>#{soid.inspect} in conversion_procs" unless converter = conversion_procs[soid]
-          end
-
-          parser = Parser.new(db_type, converter)
-          add_conversion_proc(oid, parser)
-
-          @pg_range_schema_types[db_type] = db_type.to_sym
-
-          singleton_class.class_eval do
-            meth = :"typecast_value_#{db_type}"
-            define_method(meth){|v| typecast_value_pg_range(v, parser)}
-            private meth
-          end
-
-          @schema_type_classes[:"#{opts[:type_symbol] || db_type}"] = PGRange
-          nil
-        end
-
         private
 
         # Handle arrays of range types in bound variables.
@@ -253,26 +239,28 @@ module Sequel
           end
         end
 
+        # Manually override the typecasting for tsrange and tstzrange types so that
+        # they use the database's timezone instead of the global Sequel
+        # timezone.
+        def get_conversion_procs
+          procs = super
+
+          procs[3908] = Parser.new("tsrange", procs[1114])
+          procs[3910] = Parser.new("tstzrange", procs[1184])
+          if defined?(PGArray::Creator)
+            procs[3909] = PGArray::Creator.new("tsrange", procs[3908])
+            procs[3911] = PGArray::Creator.new("tstzrange", procs[3910])
+          end
+
+          procs
+        end
+
         # Recognize the registered database range types.
         def schema_column_type(db_type)
-          if type = @pg_range_schema_types[db_type]
+          if type = RANGE_TYPES[db_type]
             type
           else
             super
-          end
-        end
-
-        # Set the :ruby_default value if the default value is recognized as a range.
-        def schema_post_process(_)
-          super.each do |a|
-            h = a[1]
-            db_type = h[:db_type]
-            if @pg_range_schema_types[db_type] && h[:default] =~ /\A'([^']+)'::#{db_type}\z/
-              default = $1
-              if convertor = conversion_procs[h[:oid]]
-                h[:ruby_default] = convertor.call(default)
-              end
-            end
           end
         end
 
@@ -358,18 +346,9 @@ module Sequel
 
       # Delegate to the ruby range object so that the object mostly acts like a range.
       range_methods = %w'each last first step'
+      range_methods << 'cover?' if RUBY_VERSION >= '1.9'
       range_methods.each do |m|
         class_eval("def #{m}(*a, &block) to_range.#{m}(*a, &block) end", __FILE__, __LINE__)
-      end
-
-      # Return whether the value is inside the range.
-      def cover?(value)
-        return false if empty?
-        b = self.begin
-        return false if b && b.public_send(exclude_begin? ? :>= : :>, value)
-        e = self.end
-        return false if e && e.public_send(exclude_end? ? :<= : :<, value)
-        true
       end
 
       # Consider the receiver equal to other PGRange instances with the
@@ -437,22 +416,20 @@ module Sequel
       # Append a literalize version of the receiver to the sql.
       def sql_literal_append(ds, sql)
         if (s = @db_type) && !empty?
-          sql << s.to_s << "("
+          sql << s.to_s << OPEN_PAREN
           ds.literal_append(sql, self.begin)
-          sql << ','
+          sql << COMMA
           ds.literal_append(sql, self.end)
-          sql << ','
-          ds.literal_append(sql, "#{exclude_begin? ? "(" : "["}#{exclude_end? ? ")" : "]"}")
-          sql << ")"
+          sql << COMMA
+          ds.literal_append(sql, "#{exclude_begin? ? OPEN_PAREN : OPEN_BRACKET}#{exclude_end? ? CLOSE_PAREN : CLOSE_BRACKET}")
+          sql << CLOSE_PAREN
         else
           ds.literal_append(sql, unquoted_literal(ds))
           if s
-            sql << '::' << s.to_s
+            sql << CAST << s.to_s
           end
         end
       end
-
-      ENDLESS_RANGE_NOT_SUPPORTED = RUBY_VERSION < '2.6'
 
       # Return a ruby Range object for this instance, if one can be created.
       def to_range
@@ -460,7 +437,7 @@ module Sequel
         raise(Error, "cannot create ruby range for an empty PostgreSQL range") if empty?
         raise(Error, "cannot create ruby range when PostgreSQL range excludes beginning element") if exclude_begin?
         raise(Error, "cannot create ruby range when PostgreSQL range has unbounded beginning") unless self.begin
-        raise(Error, "cannot create ruby range when PostgreSQL range has unbounded ending") if ENDLESS_RANGE_NOT_SUPPORTED && !self.end
+        raise(Error, "cannot create ruby range when PostgreSQL range has unbounded ending") unless self.end
         @range = Range.new(self.begin, self.end, exclude_end?)
       end
 
@@ -468,7 +445,7 @@ module Sequel
       # it must have a beginning and an ending (no unbounded ranges), and it cannot exclude
       # the beginning element.
       def valid_ruby_range?
-        !(empty? || exclude_begin? || !self.begin || (ENDLESS_RANGE_NOT_SUPPORTED && !self.end))
+        !(empty? || exclude_begin? || !self.begin || !self.end)
       end
 
       # Whether the beginning of the range is unbounded.
@@ -485,9 +462,9 @@ module Sequel
       # Separated out for use by the bound argument code.
       def unquoted_literal(ds)
         if empty?
-          'empty'
+          EMPTY
         else
-          "#{exclude_begin? ? "(" : "["}#{escape_value(self.begin, ds)},#{escape_value(self.end, ds)}#{exclude_end? ? ")" : "]"}"
+          "#{exclude_begin? ? OPEN_PAREN : OPEN_BRACKET}#{escape_value(self.begin, ds)},#{escape_value(self.end, ds)}#{exclude_end? ? CLOSE_PAREN : CLOSE_BRACKET}"
         end
       end
 
@@ -498,7 +475,7 @@ module Sequel
       def escape_value(k, ds)
         case k
         when nil
-          ''
+          EMPTY_STRING
         when Date, Time
           ds.literal(k)[1...-1]
         when Integer, Float
@@ -509,14 +486,29 @@ module Sequel
           k
         when String
           if k.empty?
-            '""'
+            QUOTED_EMPTY_STRING
           else
-            k.gsub(/("|,|\\|\[|\]|\(|\))/, '\\\\\1')
+            k.gsub(ESCAPE_RE, ESCAPE_REPLACE)
           end
         else
-          ds.literal(k).gsub(/("|,|\\|\[|\]|\(|\))/, '\\\\\1')
+          ds.literal(k).gsub(ESCAPE_RE, ESCAPE_REPLACE)
         end
       end
+    end
+
+    PGRange.register('int4range', :oid=>3904, :subtype_oid=>23)
+    PGRange.register('numrange', :oid=>3906, :subtype_oid=>1700)
+    PGRange.register('tsrange', :oid=>3908, :subtype_oid=>1114)
+    PGRange.register('tstzrange', :oid=>3910, :subtype_oid=>1184)
+    PGRange.register('daterange', :oid=>3912, :subtype_oid=>1082)
+    PGRange.register('int8range', :oid=>3926, :subtype_oid=>20)
+    if defined?(PGArray) && PGArray.respond_to?(:register)
+      PGArray.register('int4range', :oid=>3905, :scalar_oid=>3904, :scalar_typecast=>:int4range)
+      PGArray.register('numrange', :oid=>3907, :scalar_oid=>3906, :scalar_typecast=>:numrange)
+      PGArray.register('tsrange', :oid=>3909, :scalar_oid=>3908, :scalar_typecast=>:tsrange)
+      PGArray.register('tstzrange', :oid=>3911, :scalar_oid=>3910, :scalar_typecast=>:tstzrange)
+      PGArray.register('daterange', :oid=>3913, :scalar_oid=>3912, :scalar_typecast=>:daterange)
+      PGArray.register('int8range', :oid=>3927, :scalar_oid=>3926, :scalar_typecast=>:int8range)
     end
   end
 

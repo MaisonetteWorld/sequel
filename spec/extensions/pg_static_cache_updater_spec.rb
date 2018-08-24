@@ -1,9 +1,8 @@
-require_relative "spec_helper"
+require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
 
 describe "pg_static_cache_updater extension" do
   before do
-    @db = Sequel.connect('mock://postgres')
-    @db.extend_datasets{def quote_identifiers?; false end}
+    @db = Sequel.mock(:host=>'postgres')
     def @db.listen(chan, opts={})
       execute("LISTEN #{chan}")
       yield(*opts[:yield])

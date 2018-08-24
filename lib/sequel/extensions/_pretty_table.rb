@@ -27,7 +27,7 @@ module Sequel
 
     # Return the string that #print will print via puts.
     def self.string(records, columns = nil) # records is an array of hashes
-      columns ||= records.first.keys.sort
+      columns ||= records.first.keys.sort_by(&:to_s)
       sizes = column_sizes(records, columns)
       sep_line = separator_line(columns, sizes)
 
@@ -36,6 +36,8 @@ module Sequel
       array << sep_line
       array.join("\n")
     end
+
+    ### Private Module Methods ###
 
     # Hash of the maximum size of the value for each column 
     def self.column_sizes(records, columns) # :nodoc:
@@ -61,7 +63,7 @@ module Sequel
     # Format the value so it takes up exactly size characters
     def self.format_cell(size, v) # :nodoc:
       case v
-      when Integer
+      when Bignum, Fixnum
         "%#{size}d" % v
       when Float, BigDecimal
         "%#{size}g" % v

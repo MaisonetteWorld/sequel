@@ -28,11 +28,9 @@ module Sequel
     # Symbols, SQL::Identifiers, SQL::QualifiedIdentifiers, and
     # SQL::AliasedExpressions.
     def columns
-      if cols = _columns
-        return cols
-      end
+      return @columns if @columns
       if (pcs = probable_columns) && pcs.all?
-        self.columns = pcs
+        @columns = pcs
       else
         super
       end

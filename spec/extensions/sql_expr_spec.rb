@@ -1,4 +1,4 @@
-require_relative "spec_helper"
+require File.join(File.dirname(File.expand_path(__FILE__)), 'spec_helper')
 
 Sequel.extension :sql_expr
 
@@ -24,7 +24,7 @@ describe "Sequel sql_expr extension" do
   end
 
   it "Numeric#sql_expr should wrap the object in a NumericExpression" do
-    [1, 2.0, 2^70, BigDecimal('1.0')].each do |o|
+    [1, 2.0, 2^70, BigDecimal.new('1.0')].each do |o|
       @ds.literal(o.sql_expr).must_equal @ds.literal(o)
       @ds.literal(o.sql_expr + 1).must_equal "(#{@ds.literal(o)} + 1)"
     end
@@ -44,6 +44,7 @@ describe "Sequel sql_expr extension" do
 
   it "Proc#sql_expr should should treat the object as a virtual row block" do
     @ds.literal(proc{a}.sql_expr).must_equal "a"
+    @ds.literal(proc{a__b}.sql_expr).must_equal "a.b"
     @ds.literal(proc{a(b)}.sql_expr).must_equal "a(b)"
   end
 

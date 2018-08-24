@@ -1,8 +1,8 @@
 # frozen-string-literal: true
 
 Sequel::JDBC.load_driver('Java::oracle.jdbc.driver.OracleDriver')
-require_relative '../shared/oracle'
-require_relative 'transactions'
+Sequel.require 'adapters/shared/oracle'
+Sequel.require 'adapters/jdbc/transactions'
 
 module Sequel
   module JDBC
@@ -14,33 +14,33 @@ module Sequel
       end
     end
 
-    module Oracle
+    class TypeConvertor
       JAVA_BIG_DECIMAL_CONSTRUCTOR = java.math.BigDecimal.java_class.constructor(Java::long).method(:new_instance)
 
-      def self.OracleDecimal(r, i)
+      def OracleDecimal(r, i)
         if v = r.getBigDecimal(i)
           i = v.long_value
           if v == JAVA_BIG_DECIMAL_CONSTRUCTOR.call(i)
             i
           else
-            ::Kernel::BigDecimal(v.to_string)
+            BigDecimal.new(v.to_string)
           end
         end
       end 
+    end
 
-      def self.OracleClob(r, i)
-        return unless clob = r.getClob(i)
-        str = clob.getSubString(1, clob.length)
-        clob.freeTemporary if clob.isTemporary
-        str
-      end
-
+    # Database and Dataset support for Oracle databases accessed via JDBC.
+    module Oracle
+      # Instance methods for Oracle Database objects accessed via JDBC.
       module DatabaseMethods
+        extend Sequel::Database::ResetIdentifierMangling
+        PRIMARY_KEY_INDEX_RE = /\Asys_/i.freeze
+
         include Sequel::Oracle::DatabaseMethods
         include Sequel::JDBC::Transactions
 
         def self.extended(db)
-          db.instance_exec do
+          db.instance_eval do
             @autosequence = opts[:autosequence]
             @primary_key_sequences = {}
           end
@@ -72,7 +72,7 @@ module Sequel
             sql = "SELECT #{literal(sequence)}.currval FROM dual"
             statement(conn) do |stmt|
               begin
-                rs = log_connection_yield(sql, conn){stmt.executeQuery(sql)}
+                rs = log_yield(sql){stmt.executeQuery(sql)}
                 rs.next
                 rs.getLong(1)
               rescue java.sql.SQLException
@@ -84,7 +84,7 @@ module Sequel
 
         # Primary key indexes appear to start with sys_ on Oracle
         def primary_key_index_re
-          /\Asys_/i
+          PRIMARY_KEY_INDEX_RE
         end
 
         def schema_parse_table(*)
@@ -110,18 +110,17 @@ module Sequel
 
         def setup_type_convertor_map
           super
-          @type_convertor_map[:OracleDecimal] = Oracle.method(:OracleDecimal)
-          @type_convertor_map[:OracleClob] = Oracle.method(:OracleClob)
+          @type_convertor_map[:OracleDecimal] = TypeConvertor::INSTANCE.method(:OracleDecimal)
         end
       end
       
+      # Dataset class for Oracle datasets accessed via JDBC.
       class Dataset < JDBC::Dataset
         include Sequel::Oracle::DatasetMethods
 
         NUMERIC_TYPE = Java::JavaSQL::Types::NUMERIC
         TIMESTAMP_TYPE = Java::JavaSQL::Types::TIMESTAMP
-        CLOB_TYPE = Java::JavaSQL::Types::CLOB
-        TIMESTAMPTZ_TYPES = [Java::oracle.jdbc.OracleTypes::TIMESTAMPTZ, Java::oracle.jdbc.OracleTypes::TIMESTAMPLTZ].freeze
+        TIMESTAMPTZ_TYPES = [Java::oracle.jdbc.OracleTypes::TIMESTAMPTZ, Java::oracle.jdbc.OracleTypes::TIMESTAMPLTZ]
 
         def type_convertor(map, meta, type, i)
           case type
@@ -133,8 +132,6 @@ module Sequel
             end
           when *TIMESTAMPTZ_TYPES
             map[TIMESTAMP_TYPE]
-          when CLOB_TYPE 
-            map[:OracleClob]
           else
             super
           end

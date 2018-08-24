@@ -1,4 +1,4 @@
-require_relative "spec_helper"
+require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
 
 describe Sequel::Model, "caching" do
   before do
@@ -43,15 +43,13 @@ describe Sequel::Model, "caching" do
       columns :name, :id
     end
    
+    @dataset = @c.dataset = @c3.dataset = @c4.dataset
+    @dataset._fetch = {:name => 'sharon'.dup, :id => 1}
+    @dataset.numrows = 1
     
     @c2 = Class.new(@c) do
       def self.name; 'SubItem' end
     end    
-
-    [@c, @c2, @c3, @c4].each do |c|
-      c.dataset = c.dataset.with_fetch(:name => 'sharon'.dup, :id => 1).with_numrows(1)
-    end
-
     @c.db.reset
   end
   
@@ -166,7 +164,7 @@ describe Sequel::Model, "caching" do
   end
 
   it "should handle lookups by nil primary keys" do
-    @c[nil].must_be_nil
+    @c[nil].must_equal nil
     @c.db.sqls.must_equal []
   end
   
@@ -202,7 +200,7 @@ describe Sequel::Model, "caching" do
   
   it "should support #[] as a shortcut to #find with hash" do
     m = @c[:id => 3]
-    @cache[m.cache_key].must_be_nil
+    @cache[m.cache_key].must_equal nil
     @c.db.sqls.must_equal ["SELECT * FROM items WHERE (id = 3) LIMIT 1"]
     m = @c[1]
     @cache[m.cache_key].must_equal m
@@ -211,7 +209,7 @@ describe Sequel::Model, "caching" do
     @c.db.sqls.must_equal ["SELECT * FROM items WHERE (id = 4) LIMIT 1"]
 
     m = @c2[:id => 3]
-    @cache[m.cache_key].must_be_nil
+    @cache[m.cache_key].must_equal nil
     @c.db.sqls.must_equal ["SELECT * FROM items WHERE (id = 3) LIMIT 1"]
     m = @c2[1]
     @cache[m.cache_key].must_equal m
@@ -234,14 +232,13 @@ describe Sequel::Model, "caching" do
   
   it "should rescue an exception if cache_store is memcached and ignore_exception is enabled" do
     @c4[1].values.must_equal(:name => 'sharon', :id => 1)
-    @c4.dataset = @c4.dataset.with_fetch(:name => 'sharon', :id => 1, :x=>1)
     m = @c4.new.save
     m.update({:name=>'blah'})
     m.values.must_equal(:name => 'blah', :id => 1, :x => 1)
   end
   
   it "should support Model.cache_get_pk for getting a value from the cache by primary key" do
-    @c.cache_get_pk(1).must_be_nil
+    @c.cache_get_pk(1).must_equal nil
     m = @c[1]
     @c.cache_get_pk(1).must_equal m
   end
@@ -249,8 +246,8 @@ describe Sequel::Model, "caching" do
   it "should support Model.cache_delete_pk for removing a value from the cache by primary key" do
     @c[1]
     @c.cache_get_pk(1).wont_equal nil
-    @c.cache_delete_pk(1).must_be_nil
-    @c.cache_get_pk(1).must_be_nil
+    @c.cache_delete_pk(1).must_equal nil
+    @c.cache_get_pk(1).must_equal nil
   end
 
   it "should support overriding the cache key prefix" do
@@ -261,7 +258,7 @@ describe Sequel::Model, "caching" do
     c2.cache_key(:id).must_equal c3.cache_key(:id)
     
     @c[1]
-    c2.cache_get_pk(1).must_be_nil
+    c2.cache_get_pk(1).must_equal nil
     m = c2[1]
     c2.cache_get_pk(1).values.must_equal @c[1].values
     c3.cache_get_pk(1).values.must_equal m.values

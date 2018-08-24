@@ -15,7 +15,7 @@ module Sequel
     # Example:
     #
     #   loader = Sequel::Dataset::PlaceholderLiteralizer.loader(DB[:items]) do |pl, ds|
-    #     ds.where(id: pl.arg).exclude(name: pl.arg).limit(1)
+    #     ds.where(:id=>pl.arg).exclude(:name=>pl.arg).limit(1)
     #   end
     #   loader.first(1, "foo")
     #   # SELECT * FROM items WHERE ((id = 1) AND (name != 'foo')) LIMIT 1
@@ -27,7 +27,7 @@ module Sequel
     # Note that this method does not handle all possible cases.  For example:
     #
     #   loader = Sequel::Dataset::PlaceholderLiteralizer.loader(DB[:items]) do |pl, ds|
-    #     ds.join(pl.arg, item_id: :id)
+    #     ds.join(pl.arg, :item_id=>:id)
     #   end
     #   loader.all(:cart_items)
     #  
@@ -35,7 +35,7 @@ module Sequel
     # best to add a table alias when joining:
     #
     #   loader = Sequel::Dataset::PlaceholderLiteralizer.loader(DB[:items]) do |pl, ds|
-    #     ds.join(Sequel.as(pl.arg, :t), item_id: :id)
+    #     ds.join(Sequel.as(pl.arg, :t), :item_id=>:id)
     #   end
     #   loader.all(:cart_items)
     #
@@ -51,7 +51,6 @@ module Sequel
           @recorder = recorder
           @pos = pos
           @transformer = transformer
-          freeze
         end
 
         # Record the SQL query offset, argument position, and transforming block where the
@@ -77,53 +76,7 @@ module Sequel
         # Yields the receiver and the dataset to the block, which should
         # call #arg on the receiver for each placeholder argument, and
         # return the dataset that you want to load.
-        def loader(dataset, &block)
-          PlaceholderLiteralizer.new(*process(dataset, &block))
-        end
-
-        # Return an Argument with the specified position, or the next position. In
-        # general you shouldn't mix calls with an argument and calls without an
-        # argument for the same receiver.
-        def arg(v=(no_arg_given = true; @argn+=1))
-          unless no_arg_given
-            @argn = v if @argn < v
-          end
-          Argument.new(self, v)
-        end
-
-        # Record the offset at which the argument is used in the SQL query, and any
-        # transforming block.
-        def use(sql, arg, transformer)
-          @args << [sql, sql.length, arg, transformer]
-        end
-
-        private
-
-        # Return an array with two elements, the first being an
-        # SQL string with interpolated prepared argument placeholders
-        # (suitable for inspect), the the second being an array of
-        # SQL fragments suitable for using for creating a 
-        # Sequel::SQL::PlaceholderLiteralString. Designed for use with
-        # emulated prepared statements.
-        def prepared_sql_and_frags(dataset, prepared_args, &block)
-          _, frags, final_sql, _ = process(dataset, &block)
-
-          frags = frags.map(&:first)
-          prepared_sql = String.new
-          frags.each_with_index do |sql, i|
-            prepared_sql << sql
-            prepared_sql << "$#{prepared_args[i]}"
-          end
-          if final_sql
-            frags << final_sql
-            prepared_sql << final_sql
-          end
-
-          [prepared_sql, frags]
-        end
-
-        # Internals of #loader and #prepared_sql_and_frags.
-        def process(dataset)
+        def loader(dataset)
           @argn = -1
           @args = []
           ds = yield self, dataset
@@ -139,7 +92,23 @@ module Sequel
           final_sql = sql[last_offset..-1]
 
           arity = @argn+1
-          [ds, fragments, final_sql, arity]
+          PlaceholderLiteralizer.new(ds.clone, fragments, final_sql, arity)
+        end
+
+        # Return an Argument with the specified position, or the next position. In
+        # general you shouldn't mix calls with an argument and calls without an
+        # argument for the same receiver.
+        def arg(v=(no_arg_given = true; @argn+=1))
+          unless no_arg_given
+            @argn = v if @argn < v
+          end
+          Argument.new(self, v)
+        end
+
+        # Record the offset at which the argument is used in the SQL query, and any
+        # transforming
+        def use(sql, arg, transformer)
+          @args << [sql, sql.length, arg, transformer]
         end
       end
 
@@ -156,21 +125,13 @@ module Sequel
         @fragments = fragments
         @final_sql = final_sql
         @arity = arity
-        freeze
-      end
-
-      # Freeze the fragments and final SQL when freezing the literalizer.
-      def freeze
-        @fragments.freeze
-        @final_sql.freeze
-        super
       end
 
       # Return a new PlaceholderLiteralizer with a modified dataset.  This yields the
       # receiver's dataset to the block, and the block should return the new dataset
       # to use.
       def with_dataset
-        dup.instance_exec{@dataset = yield @dataset; self}.freeze
+        dup.instance_exec{@dataset = yield @dataset; self}
       end
 
       # Return an array of all objects by running the SQL query for the given arguments.

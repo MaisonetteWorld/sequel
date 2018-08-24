@@ -26,25 +26,32 @@ module Sequel
     # for eval.
     def eval_inspect(obj)
       case obj
-      when BigDecimal
-        "Kernel::BigDecimal(#{obj.to_s.inspect})"
-      when Sequel::SQL::Blob, Sequel::LiteralString
-        "#{obj.class}.new(#{obj.to_s.inspect})"
-      when Sequel::SQL::ValueList
-        "#{obj.class}.new(#{obj.to_a.inspect})"
+      when Sequel::SQL::Blob, Sequel::LiteralString, Sequel::SQL::ValueList
+        "#{obj.class}.new(#{obj.inspect})"
       when Array
         "[#{obj.map{|o| eval_inspect(o)}.join(', ')}]"
       when Hash
         "{#{obj.map{|k, v| "#{eval_inspect(k)} => #{eval_inspect(v)}"}.join(', ')}}"
       when Time
         datepart = "%Y-%m-%dT" unless obj.is_a?(Sequel::SQLTime)
-        "#{obj.class}.parse(#{obj.strftime("#{datepart}%T.%N%z").inspect})#{'.utc' if obj.utc?}"
+        if RUBY_VERSION < '1.9'
+        # :nocov:
+          # Time on 1.8 doesn't handle %N (or %z on Windows), manually set the usec value in the string
+          hours, mins = obj.utc_offset.divmod(3600)
+          mins /= 60
+          "#{obj.class}.parse(#{obj.strftime("#{datepart}%H:%M:%S.#{sprintf('%06i%+03i%02i', obj.usec, hours, mins)}").inspect})#{'.utc' if obj.utc?}"
+        # :nocov:
+        else
+          "#{obj.class}.parse(#{obj.strftime("#{datepart}%T.%N%z").inspect})#{'.utc' if obj.utc?}"
+        end
       when DateTime
         # Ignore date of calendar reform
         "DateTime.parse(#{obj.strftime('%FT%T.%N%z').inspect})"
       when Date
         # Ignore offset and date of calendar reform
         "Date.new(#{obj.year}, #{obj.month}, #{obj.day})"
+      when BigDecimal
+        "BigDecimal.new(#{obj.to_s.inspect})"
       else
         obj.inspect
       end
@@ -66,11 +73,9 @@ module Sequel
         args = inspect_args.map do |arg|
           if arg.is_a?(String) && arg =~ /\A\*/
             # Special case string arguments starting with *, indicating that
-            # they should return an array to be splatted as the remaining arguments.
-            # Allow calling private methods to get inspect output.
+            # they should return an array to be splatted as the remaining arguments
             send(arg.sub('*', '')).map{|a| Sequel.eval_inspect(a)}.join(', ')
           else
-            # Allow calling private methods to get inspect output.
             Sequel.eval_inspect(send(arg))
           end
         end

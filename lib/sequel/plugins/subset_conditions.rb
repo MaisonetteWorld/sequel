@@ -13,9 +13,7 @@ module Sequel
     #   Album.plugin :subset_conditions
     #
     #   # This will now create a published_conditions method
-    #   Album.dataset_module do
-    #     subset :published, published: true
-    #   end
+    #   Album.subset :published, :published => true
     #
     #   Album.where(Album.published_conditions).sql
     #   # SELECT * FROM albums WHERE (published IS TRUE)
@@ -23,24 +21,16 @@ module Sequel
     #   Album.exclude(Album.published_conditions).sql
     #   # SELECT * FROM albums WHERE (published IS NOT TRUE)
     #
-    #   Album.where(Album.published_conditions | {ready: true}).sql
+    #   Album.where(Sequel.|(Album.published_conditions, :ready=>true)).sql
     #   # SELECT * FROM albums WHERE ((published IS TRUE) OR (ready IS TRUE))
     module SubsetConditions
-      def self.apply(mod, &block)
-        mod.instance_exec do
-          @dataset_module_class = Class.new(@dataset_module_class) do
-            include DatasetModuleMethods
-          end
-        end
-      end
-
-      module DatasetModuleMethods
+      module ClassMethods
         # Also create a method that returns the conditions the filter uses.
-        def where(name, *args, &block)
+        def subset(name, *args, &block)
           super
           cond = args
           cond = cond.first if cond.size == 1
-          define_method(:"#{name}_conditions"){filter_expr(cond, &block)}
+          def_dataset_method(:"#{name}_conditions"){filter_expr(cond, &block)}
         end
       end
     end

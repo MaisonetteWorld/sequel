@@ -137,7 +137,7 @@ module Sequel
         #   name.gsub(/i/i, 'o')
         #   column_change(:name) # => ['Initial', 'onotoal']
         def will_change_column(column)
-          _add_changed_column(column)
+          changed_columns << column unless changed_columns.include?(column)
           check_missing_initial_value(column)
 
           value = if initial_values.has_key?(column)
@@ -186,7 +186,7 @@ module Sequel
             initial = iv[column]
             super
             if value == initial
-              _changed_columns.delete(column) unless missing_initial_values.include?(column)
+              changed_columns.delete(column) unless missing_initial_values.include?(column)
               iv.delete(column)
             end
           else

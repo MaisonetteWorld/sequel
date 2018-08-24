@@ -1,4 +1,4 @@
-require_relative "spec_helper"
+require File.join(File.dirname(File.expand_path(__FILE__)), 'spec_helper')
 
 describe "split_array_nil extension" do
   before do

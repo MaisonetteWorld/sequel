@@ -1,4 +1,4 @@
-require_relative "spec_helper"
+require File.join(File.dirname(File.expand_path(__FILE__)), 'spec_helper')
 
 Sequel.extension :columns_introspection
 
@@ -10,7 +10,7 @@ describe "columns_introspection extension" do
   end
 
   it "should not issue a database query if the columns are already loaded" do
-    @ds.send(:columns=, [:x])
+    @ds.instance_variable_set(:@columns, [:x])
     @ds.columns.must_equal [:x]
     @db.sqls.length.must_equal 0
   end
@@ -20,17 +20,17 @@ describe "columns_introspection extension" do
     @db.sqls.length.must_equal 0
   end
 
-  with_symbol_splitting "should handle qualified symbols without a database query" do
+  it "should handle qualified symbols without a database query" do
     @ds.select(:t__x).columns.must_equal [:x]
     @db.sqls.length.must_equal 0
   end
 
-  with_symbol_splitting "should handle aliased symbols without a database query" do
+  it "should handle aliased symbols without a database query" do
     @ds.select(:x___a).columns.must_equal [:a]
     @db.sqls.length.must_equal 0
   end
 
-  with_symbol_splitting "should handle qualified and aliased symbols without a database query" do
+  it "should handle qualified and aliased symbols without a database query" do
     @ds.select(:t__x___a).columns.must_equal [:a]
     @db.sqls.length.must_equal 0
   end
@@ -74,7 +74,8 @@ describe "columns_introspection extension" do
 
   it "should issue a database query when common table expressions are used" do
     @db.instance_variable_set(:@schemas, "a"=>[[:x, {}]])
-    @ds.with_extend{def supports_cte?(*) true end}.with(:a, @ds).columns
+    def @ds.supports_cte?(*) true end
+    @ds.with(:a, @ds).columns
     @db.sqls.length.must_equal 1
   end
 

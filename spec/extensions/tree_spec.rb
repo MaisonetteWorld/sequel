@@ -1,4 +1,4 @@
-require_relative "spec_helper"
+require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
 
 describe Sequel::Model, "tree plugin" do
   def klass(opts={})
@@ -48,7 +48,7 @@ describe Sequel::Model, "tree plugin" do
   end
 
   it "should have tree_order give the order of the association" do
-    @c.tree_order.must_be_nil
+    @c.tree_order.must_equal nil
     klass(:order=>:name).tree_order.must_equal :name
     klass(:order=>[:parent_id, :name]).tree_order.must_equal [:parent_id, :name]
   end
@@ -60,7 +60,7 @@ describe Sequel::Model, "tree plugin" do
   end
 
   it "should have roots return an array of the tree's roots" do
-    @c.dataset = @c.dataset.with_fetch([{:id=>1, :parent_id=>nil, :name=>'r'}])
+    @ds._fetch = [{:id=>1, :parent_id=>nil, :name=>'r'}]
     @c.roots.must_equal [@c.load(:id=>1, :parent_id=>nil, :name=>'r')]
     @db.sqls.must_equal ["SELECT * FROM nodes WHERE (parent_id IS NULL)"]
   end
@@ -70,14 +70,14 @@ describe Sequel::Model, "tree plugin" do
   end
 
   it "should have ancestors return the ancestors of the current node" do
-    @c.dataset = @c.dataset.with_fetch([[{:id=>1, :parent_id=>5, :name=>'r'}], [{:id=>5, :parent_id=>nil, :name=>'r2'}]])
+    @ds._fetch = [[{:id=>1, :parent_id=>5, :name=>'r'}], [{:id=>5, :parent_id=>nil, :name=>'r2'}]]
     @o.ancestors.must_equal [@c.load(:id=>1, :parent_id=>5, :name=>'r'), @c.load(:id=>5, :parent_id=>nil, :name=>'r2')]
     @db.sqls.must_equal ["SELECT * FROM nodes WHERE id = 1",
       "SELECT * FROM nodes WHERE id = 5"]
   end
 
   it "should have descendants return the descendants of the current node" do
-    @c.dataset = @c.dataset.with_fetch([[{:id=>3, :parent_id=>2, :name=>'r'}, {:id=>4, :parent_id=>2, :name=>'r2'}], [{:id=>5, :parent_id=>4, :name=>'r3'}], []])
+    @ds._fetch = [[{:id=>3, :parent_id=>2, :name=>'r'}, {:id=>4, :parent_id=>2, :name=>'r2'}], [{:id=>5, :parent_id=>4, :name=>'r3'}], []]
     @o.descendants.must_equal [@c.load(:id=>3, :parent_id=>2, :name=>'r'), @c.load(:id=>4, :parent_id=>2, :name=>'r2'), @c.load(:id=>5, :parent_id=>4, :name=>'r3')] 
     @db.sqls.must_equal ["SELECT * FROM nodes WHERE (nodes.parent_id = 2)",
       "SELECT * FROM nodes WHERE (nodes.parent_id = 3)",
@@ -86,7 +86,7 @@ describe Sequel::Model, "tree plugin" do
   end
 
   it "should have root return the root of the current node" do
-    @c.dataset = @c.dataset.with_fetch([[{:id=>1, :parent_id=>5, :name=>'r'}], [{:id=>5, :parent_id=>nil, :name=>'r2'}]])
+    @ds._fetch = [[{:id=>1, :parent_id=>5, :name=>'r'}], [{:id=>5, :parent_id=>nil, :name=>'r2'}]]
     @o.root.must_equal @c.load(:id=>5, :parent_id=>nil, :name=>'r2')
     @db.sqls.must_equal ["SELECT * FROM nodes WHERE id = 1",
       "SELECT * FROM nodes WHERE id = 5"]
@@ -102,64 +102,17 @@ describe Sequel::Model, "tree plugin" do
   end
 
   it "should have self_and_siblings return the children of the current node's parent" do
-    @c.dataset = @c.dataset.with_fetch([[{:id=>1, :parent_id=>3, :name=>'r'}], [{:id=>7, :parent_id=>1, :name=>'r2'}, @o.values.dup]])
+    @ds._fetch = [[{:id=>1, :parent_id=>3, :name=>'r'}], [{:id=>7, :parent_id=>1, :name=>'r2'}, @o.values.dup]]
     @o.self_and_siblings.must_equal [@c.load(:id=>7, :parent_id=>1, :name=>'r2'), @o] 
     @db.sqls.must_equal ["SELECT * FROM nodes WHERE id = 1",
       "SELECT * FROM nodes WHERE (nodes.parent_id = 1)"]
   end
 
-  it "should have self_and_siblings return the roots if the current object is a root" do
-    h = {:id=>2, :parent_id=>nil, :name=>'AA'}
-    @c.dataset = @c.dataset.with_fetch(h)
-    @c.load(h).self_and_siblings.must_equal [@c.load(h)]
-    @db.sqls.must_equal ["SELECT * FROM nodes WHERE (parent_id IS NULL)"]
-  end
-
   it "should have siblings return the children of the current node's parent, except for the current node" do
-    @c.dataset = @c.dataset.with_fetch([[{:id=>1, :parent_id=>3, :name=>'r'}], [{:id=>7, :parent_id=>1, :name=>'r2'}, @o.values.dup]])
+    @ds._fetch = [[{:id=>1, :parent_id=>3, :name=>'r'}], [{:id=>7, :parent_id=>1, :name=>'r2'}, @o.values.dup]]
     @o.siblings.must_equal [@c.load(:id=>7, :parent_id=>1, :name=>'r2')] 
     @db.sqls.must_equal ["SELECT * FROM nodes WHERE id = 1",
       "SELECT * FROM nodes WHERE (nodes.parent_id = 1)"]
-  end
-
-  it "should have methods work correctly with custom association names" do
-    o = klass(:primary_key=>:i, :key=>:pi, :order=>:name, :children=>{:name=>:cs}, :parent=>{:name=>:p}).load(:id=>2, :parent_id=>1, :name=>'AA', :i=>3, :pi=>4)
-    
-    o.model.parent_association_name.must_equal :p
-    o.model.children_association_name.must_equal :cs
-    o.model.dataset = o.model.dataset.with_fetch(lambda do |sql|
-      case sql
-      when "SELECT * FROM nodes WHERE (nodes.i = 4) ORDER BY name LIMIT 1"
-        {:id=>7, :parent_id=>8, :name=>'r2', :i=>4, :pi=>5}
-      when "SELECT * FROM nodes WHERE (nodes.i = 5) ORDER BY name LIMIT 1"
-        {:id=>10, :parent_id=>11, :name=>'r3', :i=>5, :pi=>nil}
-      when 'SELECT * FROM nodes WHERE (nodes.pi = 3) ORDER BY name'
-        {:id=>12, :parent_id=>13, :name=>'r4', :i=>7, :pi=>3}
-      when 'SELECT * FROM nodes WHERE (nodes.pi = 7) ORDER BY name'
-        {:id=>14, :parent_id=>15, :name=>'r5', :i=>8, :pi=>7}
-      when 'SELECT * FROM nodes WHERE (nodes.pi = 8) ORDER BY name'
-        []
-      when 'SELECT * FROM nodes WHERE (nodes.pi = 4) ORDER BY name'
-        [{:id=>2, :parent_id=>1, :name=>'AA', :i=>3, :pi=>4}, {:id=>20, :parent_id=>21, :name=>'r6', :i=>9, :pi=>4}]
-      else
-        raise sql
-      end
-    end)
-    o.db.sqls.must_equal []
-
-    o.ancestors.must_equal [o.model.load(:id=>7, :parent_id=>8, :name=>'r2', :i=>4, :pi=>5),
-      o.model.load(:id=>10, :parent_id=>11, :name=>'r3', :i=>5, :pi=>nil)]
-    o.db.sqls.must_equal ["SELECT * FROM nodes WHERE (nodes.i = 4) ORDER BY name LIMIT 1",
-      "SELECT * FROM nodes WHERE (nodes.i = 5) ORDER BY name LIMIT 1"]
-
-    o.descendants.must_equal [o.model.load(:id=>12, :parent_id=>13, :name=>'r4', :i=>7, :pi=>3),
-      o.model.load(:id=>14, :parent_id=>15, :name=>'r5', :i=>8, :pi=>7)]
-    o.db.sqls.must_equal ["SELECT * FROM nodes WHERE (nodes.pi = 3) ORDER BY name",
-      "SELECT * FROM nodes WHERE (nodes.pi = 7) ORDER BY name",
-      "SELECT * FROM nodes WHERE (nodes.pi = 8) ORDER BY name"]
-
-    o.siblings.must_equal [o.model.load(:id=>20, :parent_id=>21, :name=>'r6', :i=>9, :pi=>4)] 
-    o.db.sqls.must_equal ["SELECT * FROM nodes WHERE (nodes.pi = 4) ORDER BY name"]
   end
 
   describe ":single_root option" do
@@ -168,23 +121,23 @@ describe Sequel::Model, "tree plugin" do
     end
 
     it "should have root class method return the root" do
-      @c.dataset = @c.dataset.with_fetch([{:id=>1, :parent_id=>nil, :name=>'r'}])
+      @c.dataset._fetch = [{:id=>1, :parent_id=>nil, :name=>'r'}]
       @c.root.must_equal @c.load(:id=>1, :parent_id=>nil, :name=>'r')
     end
 
     it "prevents creating a second root" do
-      @c.dataset = @c.dataset.with_fetch([{:id=>1, :parent_id=>nil, :name=>'r'}])
+      @c.dataset._fetch = [{:id=>1, :parent_id=>nil, :name=>'r'}]
       lambda { @c.create }.must_raise(Sequel::Plugins::Tree::TreeMultipleRootError)
     end
 
     it "errors when promoting an existing record to a second root" do
-      @c.dataset = @c.dataset.with_fetch([{:id=>1, :parent_id=>nil, :name=>'r'}])
+      @c.dataset._fetch = [{:id=>1, :parent_id=>nil, :name=>'r'}]
       n = @c.load(:id => 2, :parent_id => 1)
       lambda { n.update(:parent_id => nil) }.must_raise(Sequel::Plugins::Tree::TreeMultipleRootError)
     end
 
     it "allows updating existing root" do
-      @c.dataset = @c.dataset.with_fetch([{:id=>1, :parent_id=>nil, :name=>'r'}])
+      @c.dataset._fetch = [{:id=>1, :parent_id=>nil, :name=>'r'}]
        @c.root.update(:name => 'fdsa') 
     end
   end
@@ -199,10 +152,6 @@ describe Sequel::Model, "tree plugin with composite keys" do
       columns :id, :id2, :name, :parent_id, :parent_id2, :i, :pi
       set_primary_key [:id, :id2]
       plugin :tree, opts.merge(:key=>[:parent_id, :parent_id2])
-      def self.set_dataset(ds)
-        super
-        set_primary_key [:id, :id2]
-      end
     end
     c
   end
@@ -225,7 +174,7 @@ describe Sequel::Model, "tree plugin with composite keys" do
   end
 
   it "should have roots return an array of the tree's roots" do
-    @c.dataset = @c.dataset.with_fetch([{:id=>1, :parent_id=>nil, :parent_id2=>nil, :name=>'r'}])
+    @ds._fetch = [{:id=>1, :parent_id=>nil, :parent_id2=>nil, :name=>'r'}]
     @c.roots.must_equal [@c.load(:id=>1, :parent_id=>nil, :parent_id2=>nil, :name=>'r')]
     @db.sqls.must_equal ["SELECT * FROM nodes WHERE ((parent_id IS NULL) OR (parent_id2 IS NULL))"]
   end
@@ -235,7 +184,7 @@ describe Sequel::Model, "tree plugin with composite keys" do
   end
 
   it "should have ancestors return the ancestors of the current node" do
-    @c.dataset = @c.dataset.with_fetch([[{:id=>1, :id2=>6, :parent_id=>5, :parent_id2=>7, :name=>'r'}], [{:id=>5, :id2=>7, :parent_id=>nil, :parent_id2=>nil, :name=>'r2'}]])
+    @ds._fetch = [[{:id=>1, :id2=>6, :parent_id=>5, :parent_id2=>7, :name=>'r'}], [{:id=>5, :id2=>7, :parent_id=>nil, :parent_id2=>nil, :name=>'r2'}]]
     @o.ancestors.must_equal [@c.load(:id=>1, :id2=>6, :parent_id=>5, :parent_id2=>7, :name=>'r'), @c.load(:id=>5, :id2=>7, :parent_id=>nil, :parent_id2=>nil, :name=>'r2')]
     sqls = @db.sqls
     sqls.length.must_equal 2
@@ -244,7 +193,7 @@ describe Sequel::Model, "tree plugin with composite keys" do
   end
 
   it "should have descendants return the descendants of the current node" do
-    @c.dataset = @c.dataset.with_fetch([[{:id=>3, :id2=>7, :parent_id=>2, :parent_id2=>5, :name=>'r'}, {:id=>4, :id2=>8, :parent_id=>2, :parent_id2=>5, :name=>'r2'}], [{:id=>5, :id2=>9, :parent_id=>4, :parent_id2=>8, :name=>'r3'}], []])
+    @ds._fetch = [[{:id=>3, :id2=>7, :parent_id=>2, :parent_id2=>5, :name=>'r'}, {:id=>4, :id2=>8, :parent_id=>2, :parent_id2=>5, :name=>'r2'}], [{:id=>5, :id2=>9, :parent_id=>4, :parent_id2=>8, :name=>'r3'}], []]
     @o.descendants.must_equal [@c.load(:id=>3, :id2=>7, :parent_id=>2, :parent_id2=>5, :name=>'r'), @c.load(:id=>4, :id2=>8, :parent_id=>2, :parent_id2=>5, :name=>'r2'), @c.load(:id=>5, :id2=>9, :parent_id=>4, :parent_id2=>8, :name=>'r3')] 
     @db.sqls.must_equal ["SELECT * FROM nodes WHERE ((nodes.parent_id = 2) AND (nodes.parent_id2 = 5))",
       "SELECT * FROM nodes WHERE ((nodes.parent_id = 3) AND (nodes.parent_id2 = 7))",
@@ -253,7 +202,7 @@ describe Sequel::Model, "tree plugin with composite keys" do
   end
 
   it "should have root return the root of the current node" do
-    @c.dataset = @c.dataset.with_fetch([[{:id=>1, :id2=>6, :parent_id=>5, :parent_id2=>7, :name=>'r'}], [{:id=>5, :id2=>7, :parent_id=>nil, :parent_id2=>nil, :name=>'r2'}]])
+    @ds._fetch = [[{:id=>1, :id2=>6, :parent_id=>5, :parent_id2=>7, :name=>'r'}], [{:id=>5, :id2=>7, :parent_id=>nil, :parent_id2=>nil, :name=>'r2'}]]
     @o.root.must_equal @c.load(:id=>5, :id2=>7, :parent_id=>nil, :parent_id2=>nil, :name=>'r2')
     sqls = @db.sqls
     sqls.length.must_equal 2
@@ -273,7 +222,7 @@ describe Sequel::Model, "tree plugin with composite keys" do
   end
 
   it "should have self_and_siblings return the children of the current node's parent" do
-    @c.dataset = @c.dataset.with_fetch([[{:id=>1, :id2=>6, :parent_id=>3, :parent_id2=>7, :name=>'r'}], [{:id=>7, :id2=>9, :parent_id=>1, :parent_id2=>6, :name=>'r2'}, @o.values.dup]])
+    @ds._fetch = [[{:id=>1, :id2=>6, :parent_id=>3, :parent_id2=>7, :name=>'r'}], [{:id=>7, :id2=>9, :parent_id=>1, :parent_id2=>6, :name=>'r2'}, @o.values.dup]]
     @o.self_and_siblings.must_equal [@c.load(:id=>7, :id2=>9, :parent_id=>1, :parent_id2=>6, :name=>'r2'), @o] 
     sqls = @db.sqls
     sqls.length.must_equal 2
@@ -282,7 +231,7 @@ describe Sequel::Model, "tree plugin with composite keys" do
   end
 
   it "should have siblings return the children of the current node's parent, except for the current node" do
-    @c.dataset = @c.dataset.with_fetch([[{:id=>1, :id2=>6, :parent_id=>3, :parent_id2=>7, :name=>'r'}], [{:id=>7, :id2=>9, :parent_id=>1, :parent_id2=>6, :name=>'r2'}, @o.values.dup]])
+    @ds._fetch = [[{:id=>1, :id2=>6, :parent_id=>3, :parent_id2=>7, :name=>'r'}], [{:id=>7, :id2=>9, :parent_id=>1, :parent_id2=>6, :name=>'r2'}, @o.values.dup]]
     @o.siblings.must_equal [@c.load(:id=>7, :id2=>9, :parent_id=>1, :parent_id2=>6, :name=>'r2')] 
     sqls = @db.sqls
     sqls.length.must_equal 2
@@ -296,36 +245,30 @@ describe Sequel::Model, "tree plugin with composite keys" do
     end
 
     it "prevents creating a second root" do
-      @c.dataset = @c.dataset.with_fetch([{:id=>1, :id2=>6, :parent_id=>nil, :parent_id2=>nil, :name=>'r'}])
+      @c.dataset._fetch = [{:id=>1, :id2=>6, :parent_id=>nil, :parent_id2=>nil, :name=>'r'}]
       lambda { @c.create }.must_raise(Sequel::Plugins::Tree::TreeMultipleRootError)
-      @c.dataset = @c.dataset.with_fetch([{:id=>1, :id2=>6, :parent_id=>1, :parent_id2=>nil, :name=>'r'}])
+      @c.dataset._fetch = [{:id=>1, :id2=>6, :parent_id=>1, :parent_id2=>nil, :name=>'r'}]
       lambda { @c.create(:parent_id2=>1) }.must_raise(Sequel::Plugins::Tree::TreeMultipleRootError)
-      @c.dataset = @c.dataset.with_fetch([{:id=>1, :id2=>6, :parent_id=>nil, :parent_id2=>2, :name=>'r'}])
+      @c.dataset._fetch = [{:id=>1, :id2=>6, :parent_id=>nil, :parent_id2=>2, :name=>'r'}]
       lambda { @c.create(:parent_id=>2) }.must_raise(Sequel::Plugins::Tree::TreeMultipleRootError)
     end
 
     it "errors when promoting an existing record to a second root" do
-      @c.dataset = @c.dataset.with_fetch([{:id=>1, :id2=>6, :parent_id=>nil, :parent_id2=>nil, :name=>'r'}])
+      @c.dataset._fetch = [{:id=>1, :id2=>6, :parent_id=>nil, :parent_id2=>nil, :name=>'r'}]
       lambda { @c.load(:id => 2, :id2=>7, :parent_id => 1, :parent_id2=>2).update(:parent_id => nil, :parent_id2=>nil) }.must_raise(Sequel::Plugins::Tree::TreeMultipleRootError)
-      @c.dataset = @c.dataset.with_fetch([{:id=>1, :id2=>6, :parent_id=>1, :parent_id2=>nil, :name=>'r'}])
+      @c.dataset._fetch = [{:id=>1, :id2=>6, :parent_id=>1, :parent_id2=>nil, :name=>'r'}]
       lambda { @c.load(:id => 2, :id2=>7, :parent_id => 1, :parent_id2=>2).update(:parent_id => nil) }.must_raise(Sequel::Plugins::Tree::TreeMultipleRootError)
-      @c.dataset = @c.dataset.with_fetch([{:id=>1, :id2=>6, :parent_id=>nil, :parent_id2=>2, :name=>'r'}])
+      @c.dataset._fetch = [{:id=>1, :id2=>6, :parent_id=>nil, :parent_id2=>2, :name=>'r'}]
       lambda { @c.load(:id => 2, :id2=>7, :parent_id => 1, :parent_id2=>2).update(:parent_id2 => nil) }.must_raise(Sequel::Plugins::Tree::TreeMultipleRootError)
     end
 
     it "allows updating existing root" do
-      @c.dataset = @c.dataset.with_fetch(:id=>1, :id2=>6, :parent_id=>nil, :parent_id2=>nil, :name=>'r')
-      @c.root.update(:name => 'fdsa') 
-      @c.dataset = @c.dataset.with_fetch(:id=>1, :id2=>6, :parent_id=>1, :parent_id2=>nil, :name=>'r')
-      @c.root.update(:name => 'fdsa') 
-      @c.dataset = @c.dataset.with_fetch(:id=>1, :id2=>6, :parent_id=>nil, :parent_id2=>2, :name=>'r')
-      @c.root.update(:name => 'fdsa') 
-    end
-
-    it "freezes tree_order if it is an array" do
-      @c.tree_order = [:id]
-      @c.freeze
-      @c.tree_order.frozen?.must_equal true
+      @c.dataset._fetch = {:id=>1, :id2=>6, :parent_id=>nil, :parent_id2=>nil, :name=>'r'}
+       @c.root.update(:name => 'fdsa') 
+      @c.dataset._fetch = {:id=>1, :id2=>6, :parent_id=>1, :parent_id2=>nil, :name=>'r'}
+       @c.root.update(:name => 'fdsa') 
+      @c.dataset._fetch = {:id=>1, :id2=>6, :parent_id=>nil, :parent_id2=>2, :name=>'r'}
+       @c.root.update(:name => 'fdsa') 
     end
   end
 end

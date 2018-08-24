@@ -8,7 +8,7 @@
 # PostgreSQL json values that are not arrays or objects, but support
 # is fairly limited and the values do not roundtrip.
 #
-# This extension integrates with Sequel's native postgres and jdbc/postgresql adapters, so
+# This extension integrates with Sequel's native postgres adapter, so
 # that when json fields are retrieved, they are parsed and returned
 # as instances of Sequel::Postgres::JSONArray or
 # Sequel::Postgres::JSONHash (or JSONBArray or JSONBHash for jsonb
@@ -35,10 +35,13 @@
 #
 # So if you want to insert an array or hash into an json database column:
 #
-#   DB[:table].insert(column: Sequel.pg_json([1, 2, 3]))
-#   DB[:table].insert(column: Sequel.pg_json({'a'=>1, 'b'=>2}))
+#   DB[:table].insert(:column=>Sequel.pg_json([1, 2, 3]))
+#   DB[:table].insert(:column=>Sequel.pg_json({'a'=>1, 'b'=>2}))
 #
-# To use this extension, please load it into the Database instance:
+# If you would like to use PostgreSQL json columns in your model
+# objects, you probably want to modify the schema parsing/typecasting
+# so that it recognizes and correctly handles the json type, which
+# you can do by:
 #
 #   DB.extension :pg_json
 #
@@ -62,9 +65,13 @@
 
 require 'delegate'
 require 'json'
+Sequel.require 'adapters/utils/pg_types'
 
 module Sequel
   module Postgres
+    CAST_JSON = '::json'.freeze
+    CAST_JSONB = '::jsonb'.freeze
+
     # Class representing PostgreSQL JSON/JSONB column array values.
     class JSONArrayBase < DelegateClass(Array)
       include Sequel::SQL::AliasMethods
@@ -81,7 +88,7 @@ module Sequel
       # Cast as json
       def sql_literal_append(ds, sql)
         super
-        sql << '::json'
+        sql << CAST_JSON
       end
     end
 
@@ -89,7 +96,7 @@ module Sequel
       # Cast as jsonb
       def sql_literal_append(ds, sql)
         super
-        sql << '::jsonb'
+        sql << CAST_JSONB
       end
     end
 
@@ -112,7 +119,7 @@ module Sequel
       # Cast as json
       def sql_literal_append(ds, sql)
         super
-        sql << '::json'
+        sql << CAST_JSON
       end
     end
 
@@ -120,20 +127,15 @@ module Sequel
       # Cast as jsonb
       def sql_literal_append(ds, sql)
         super
-        sql << '::jsonb'
+        sql << CAST_JSONB
       end
     end
 
     # Methods enabling Database object integration with the json type.
     module JSONDatabaseMethods
       def self.extended(db)
-        db.instance_exec do
-          add_conversion_proc(114, JSONDatabaseMethods.method(:db_parse_json))
-          add_conversion_proc(3802, JSONDatabaseMethods.method(:db_parse_jsonb))
-          if respond_to?(:register_array_type)
-            register_array_type('json', :oid=>199, :scalar_oid=>114)
-            register_array_type('jsonb', :oid=>3807, :scalar_oid=>3802)
-          end
+        db.instance_eval do
+          copy_conversion_procs([114, 199, 3802, 3807])
           @schema_type_classes[:json] = [JSONHash, JSONArray]
           @schema_type_classes[:jsonb] = [JSONBHash, JSONBArray]
         end
@@ -180,7 +182,7 @@ module Sequel
         end
       end
 
-      # Handle json and jsonb types in bound variables
+      # Handle JSONArray and JSONHash in bound variables
       def bound_variable_arg(arg, conn)
         case arg
         when JSONArrayBase, JSONHashBase
@@ -192,7 +194,7 @@ module Sequel
 
       private
 
-      # Handle json[] and jsonb[] types in bound variables.
+      # Handle json[] types in bound variables.
       def bound_variable_array(a)
         case a
         when JSONHashBase, JSONArrayBase
@@ -202,7 +204,7 @@ module Sequel
         end
       end
 
-      # Make the column type detection recognize the json types.
+      # Make the column type detection recognize the json type.
       def schema_column_type(db_type)
         case db_type
         when 'json'
@@ -211,30 +213,6 @@ module Sequel
           :jsonb
         else
           super
-        end
-      end
-
-      # Set the :callable_default value if the default value is recognized as an empty json/jsonb array/hash.
-      def schema_post_process(_)
-        super.each do |a|
-          h = a[1]
-          if (h[:type] == :json || h[:type] == :jsonb) && h[:default] =~ /\A'(\{\}|\[\])'::jsonb?\z/
-            is_array = $1 == '[]'
-
-            klass = if h[:type] == :json
-              if is_array
-                JSONArray
-              else
-                JSONHash
-              end
-            elsif is_array
-              JSONBArray
-            else
-              JSONBHash
-            end
-
-            h[:callable_default] = lambda{klass.new(is_array ? [] : {})}
-          end
         end
       end
 
@@ -277,6 +255,13 @@ module Sequel
           raise Sequel::InvalidValue, "invalid value for jsonb: #{value.inspect}"
         end
       end
+    end
+
+    PG_TYPES[114] = JSONDatabaseMethods.method(:db_parse_json)
+    PG_TYPES[3802] = JSONDatabaseMethods.method(:db_parse_jsonb)
+    if defined?(PGArray) && PGArray.respond_to?(:register)
+      PGArray.register('json', :oid=>199, :scalar_oid=>114)
+      PGArray.register('jsonb', :oid=>3807, :scalar_oid=>3802)
     end
   end
 

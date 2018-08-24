@@ -1,9 +1,9 @@
-require_relative "spec_helper"
+require File.join(File.dirname(File.expand_path(__FILE__)), 'spec_helper.rb')
 
 describe "Class Table Inheritance Plugin" do
   before(:all) do
     @db = DB
-    @db.instance_variable_get(:@schemas).clear
+    @db.instance_variable_set(:@schemas, {})
     @db.drop_table?(:staff, :executives, :managers, :employees)
     @db.create_table(:employees) do
       primary_key :id
@@ -38,8 +38,7 @@ describe "Class Table Inheritance Plugin" do
     class ::Staff < Employee
       many_to_one :manager
     end 
-    class ::Intern < Employee
-    end 
+    
     
     @i1 = @db[:employees].insert(:name=>'E', :kind=>'Employee')
     @i2 = @db[:employees].insert(:name=>'S', :kind=>'Staff')
@@ -52,10 +51,9 @@ describe "Class Table Inheritance Plugin" do
     @db[:managers].insert(:id=>@i5, :num_staff=>2)
     @db[:executives].insert(:id=>@i5, :num_managers=>1)
     @db[:staff].insert(:id=>@i2, :manager_id=>@i4)
-    @i6 = @db[:employees].insert(:name=>'I', :kind=>'Intern')
   end
   after do
-    [:Intern, :Ceo, :Executive, :Manager, :Staff, :Employee].each{|s| Object.send(:remove_const, s)}
+    [:Ceo, :Executive, :Manager, :Staff, :Employee].each{|s| Object.send(:remove_const, s)}
   end
   after(:all) do
     @db.drop_table? :staff, :executives, :managers, :employees
@@ -67,33 +65,32 @@ describe "Class Table Inheritance Plugin" do
       Staff.load(:id=>@i2, :name=>'S', :kind=>'Staff'),
       Manager.load(:id=>@i3, :name=>'M', :kind=>'Manager'),
       Executive.load(:id=>@i4, :name=>'Ex', :kind=>'Executive'),
-      Ceo.load(:id=>@i5, :name=>'C', :kind=>'Ceo'),
-      Intern.load(:id=>@i6, :name=>'I', :kind=>'Intern'),
+      Ceo.load(:id=>@i5, :name=>'C', :kind=>'Ceo')
     ]
   end
   
   it "should lazily load columns in subclass tables" do
-    Employee[@i2][:manager_id].must_be_nil
+    Employee[@i2][:manager_id].must_equal nil
     Employee[@i2].manager_id.must_equal @i4
-    Employee[@i3][:num_staff].must_be_nil
+    Employee[@i3][:num_staff].must_equal nil
     Employee[@i3].num_staff.must_equal 7
-    Employee[@i4][:num_staff].must_be_nil
+    Employee[@i4][:num_staff].must_equal nil
     Employee[@i4].num_staff.must_equal 5
-    Employee[@i4][:num_managers].must_be_nil
+    Employee[@i4][:num_managers].must_equal nil
     Employee[@i4].num_managers.must_equal 6
-    Employee[@i5][:num_managers].must_be_nil
+    Employee[@i5][:num_managers].must_equal nil
     Employee[@i5].num_managers.must_equal 1
   end
   
   it "should eagerly load columns in subclass tables when retrieving multiple objects" do
     a = Employee.order(:id).all
-    a[1][:manager_id].must_be_nil
+    a[1][:manager_id].must_equal nil
     a[1].manager_id.must_equal @i4
-    a[2][:num_staff].must_be_nil
+    a[2][:num_staff].must_equal nil
     a[2].num_staff.must_equal 7
     a[3][:num_staff].must_equal 5 # eagerly loaded by previous call
     a[3].num_staff.must_equal 5
-    a[3][:num_managers].must_be_nil
+    a[3][:num_managers].must_equal nil
     a[3].num_managers.must_equal 6
     a[4][:num_managers].must_equal 1
     a[4].num_managers.must_equal 1
@@ -105,7 +102,6 @@ describe "Class Table Inheritance Plugin" do
     Manager.db_schema.keys.sort_by{|x| x.to_s}.must_equal [:id, :kind, :name, :num_staff]
     Executive.db_schema.keys.sort_by{|x| x.to_s}.must_equal [:id, :kind, :name, :num_managers, :num_staff]
     Ceo.db_schema.keys.sort_by{|x| x.to_s}.must_equal [:id, :kind, :name, :num_managers, :num_staff]
-    Intern.db_schema.keys.sort_by{|x| x.to_s}.must_equal [:id, :kind, :name]
   end
   
   it "should include columns for tables for ancestor classes" do
@@ -114,7 +110,6 @@ describe "Class Table Inheritance Plugin" do
     Manager.columns.must_equal [:id, :name, :kind, :num_staff]
     Executive.columns.must_equal [:id, :name, :kind, :num_staff, :num_managers]
     Ceo.columns.must_equal [:id, :name, :kind, :num_staff, :num_managers]
-    Intern.columns.must_equal [:id, :name, :kind]
   end
   
   it "should delete rows from all tables" do
@@ -122,13 +117,13 @@ describe "Class Table Inheritance Plugin" do
     i = e.id
     e.staff_members_dataset.destroy
     e.destroy
-    @db[:executives][:id=>i].must_be_nil
-    @db[:managers][:id=>i].must_be_nil
-    @db[:employees][:id=>i].must_be_nil
+    @db[:executives][:id=>i].must_equal nil
+    @db[:managers][:id=>i].must_equal nil
+    @db[:employees][:id=>i].must_equal nil
   end
   
   it "should handle associations only defined in subclasses" do
-    Employee.filter(Sequel[:employees][:id]=>@i2).all.first.manager.id.must_equal @i4
+    Employee.filter(:employees__id=>@i2).all.first.manager.id.must_equal @i4
   end
 
   it "should insert rows into all tables" do
@@ -163,15 +158,15 @@ describe "Class Table Inheritance Plugin" do
   end
   
   it "should handle one_to_many relationships" do
-    Executive.first(:name=>'Ex').staff_members.must_equal [Staff[@i2]]
+    Executive.first.staff_members.must_equal [Staff[@i2]]
   end
   
   it "should handle eagerly loading one_to_many relationships" do
-    Executive.where(:name=>'Ex').eager(:staff_members).first.staff_members.must_equal [Staff[@i2]]
+    Executive.limit(1).eager(:staff_members).first.staff_members.must_equal [Staff[@i2]]
   end
   
   it "should handle eagerly graphing one_to_many relationships" do
-    es = Executive.where(Sequel[:employees][:name]=>'Ex').eager_graph(:staff_members).all
+    es = Executive.limit(1).eager_graph(:staff_members).all
     es.must_equal [Executive[@i4]]
     es.map{|x| x.staff_members}.must_equal [[Staff[@i2]]]
   end
@@ -180,7 +175,7 @@ end
 describe "Many Through Many Plugin" do
   before(:all) do
     @db = DB
-    @db.instance_variable_get(:@schemas).clear
+    @db.instance_variable_set(:@schemas, {})
     @db.drop_table?(:albums_artists, :albums, :artists)
     @db.create_table(:albums) do
       primary_key :id
@@ -242,6 +237,7 @@ describe "Many Through Many Plugin" do
     Artist[@artist3.id].albums.map{|x| x.name}.sort.must_equal %w'B C'
     Artist[@artist4.id].albums.map{|x| x.name}.sort.must_equal %w'B D'
     
+    Artist.plugin :prepared_statements_associations
     Artist[@artist1.id].albums.map{|x| x.name}.sort.must_equal %w'A D'
     Artist[@artist2.id].albums.map{|x| x.name}.sort.must_equal %w'A C'
     Artist[@artist3.id].albums.map{|x| x.name}.sort.must_equal %w'B C'
@@ -252,10 +248,10 @@ describe "Many Through Many Plugin" do
     Artist.filter(:id=>@artist3.id).eager(:albums).all.map{|x| x.albums.map{|a| a.name}}.flatten.sort.must_equal %w'B C'
     Artist.filter(:id=>@artist4.id).eager(:albums).all.map{|x| x.albums.map{|a| a.name}}.flatten.sort.must_equal %w'B D'
     
-    Artist.filter(Sequel[:artists][:id]=>@artist1.id).eager_graph(:albums).all.map{|x| x.albums.map{|a| a.name}}.flatten.sort.must_equal %w'A D'
-    Artist.filter(Sequel[:artists][:id]=>@artist2.id).eager_graph(:albums).all.map{|x| x.albums.map{|a| a.name}}.flatten.sort.must_equal %w'A C'
-    Artist.filter(Sequel[:artists][:id]=>@artist3.id).eager_graph(:albums).all.map{|x| x.albums.map{|a| a.name}}.flatten.sort.must_equal %w'B C'
-    Artist.filter(Sequel[:artists][:id]=>@artist4.id).eager_graph(:albums).all.map{|x| x.albums.map{|a| a.name}}.flatten.sort.must_equal %w'B D'
+    Artist.filter(:artists__id=>@artist1.id).eager_graph(:albums).all.map{|x| x.albums.map{|a| a.name}}.flatten.sort.must_equal %w'A D'
+    Artist.filter(:artists__id=>@artist2.id).eager_graph(:albums).all.map{|x| x.albums.map{|a| a.name}}.flatten.sort.must_equal %w'A C'
+    Artist.filter(:artists__id=>@artist3.id).eager_graph(:albums).all.map{|x| x.albums.map{|a| a.name}}.flatten.sort.must_equal %w'B C'
+    Artist.filter(:artists__id=>@artist4.id).eager_graph(:albums).all.map{|x| x.albums.map{|a| a.name}}.flatten.sort.must_equal %w'B D'
 
     Artist.filter(:albums=>@album1).all.map{|a| a.name}.sort.must_equal %w'1 2'
     Artist.filter(:albums=>@album2).all.map{|a| a.name}.sort.must_equal %w'3 4'
@@ -293,17 +289,18 @@ describe "Many Through Many Plugin" do
     c.exclude(:albums=>[@album1, @album3]).all.map{|a| a.name}.sort.must_equal %w'4'
     c.exclude(:albums=>[@album2, @album4]).all.map{|a| a.name}.sort.must_equal %w'2'
 
-    c.filter(:albums=>self_join(Album).filter(Sequel[:albums][:id]=>[@album1.id, @album3.id])).all.map{|a| a.name}.sort.must_equal %w'1 2 3'
-    c.exclude(:albums=>self_join(Album).filter(Sequel[:albums][:id]=>[@album1.id, @album3.id])).all.map{|a| a.name}.sort.must_equal %w'4'
+    c.filter(:albums=>self_join(Album).filter(:albums__id=>[@album1.id, @album3.id])).all.map{|a| a.name}.sort.must_equal %w'1 2 3'
+    c.exclude(:albums=>self_join(Album).filter(:albums__id=>[@album1.id, @album3.id])).all.map{|a| a.name}.sort.must_equal %w'4'
   end
 
   it "should handle typical case with 3 join tables" do
-    Artist.many_through_many :related_artists, [[:albums_artists, :artist_id, :album_id], [:albums, :id, :id], [:albums_artists, :album_id, :artist_id]], :class=>Artist, :distinct=>true, :delay_pks=>false
+    Artist.many_through_many :related_artists, [[:albums_artists, :artist_id, :album_id], [:albums, :id, :id], [:albums_artists, :album_id, :artist_id]], :class=>Artist, :distinct=>true
     Artist[@artist1.id].related_artists.map{|x| x.name}.sort.must_equal %w'1 2 4'
     Artist[@artist2.id].related_artists.map{|x| x.name}.sort.must_equal %w'1 2 3'
     Artist[@artist3.id].related_artists.map{|x| x.name}.sort.must_equal %w'2 3 4'
     Artist[@artist4.id].related_artists.map{|x| x.name}.sort.must_equal %w'1 3 4'
     
+    Artist.plugin :prepared_statements_associations
     Artist[@artist1.id].related_artists.map{|x| x.name}.sort.must_equal %w'1 2 4'
     Artist[@artist2.id].related_artists.map{|x| x.name}.sort.must_equal %w'1 2 3'
     Artist[@artist3.id].related_artists.map{|x| x.name}.sort.must_equal %w'2 3 4'
@@ -314,10 +311,10 @@ describe "Many Through Many Plugin" do
     Artist.filter(:id=>@artist3.id).eager(:related_artists).all.map{|x| x.related_artists.map{|a| a.name}}.flatten.sort.must_equal %w'2 3 4'
     Artist.filter(:id=>@artist4.id).eager(:related_artists).all.map{|x| x.related_artists.map{|a| a.name}}.flatten.sort.must_equal %w'1 3 4'
     
-    Artist.filter(Sequel[:artists][:id]=>@artist1.id).eager_graph(:related_artists).all.map{|x| x.related_artists.map{|a| a.name}}.flatten.sort.must_equal %w'1 2 4'
-    Artist.filter(Sequel[:artists][:id]=>@artist2.id).eager_graph(:related_artists).all.map{|x| x.related_artists.map{|a| a.name}}.flatten.sort.must_equal %w'1 2 3'
-    Artist.filter(Sequel[:artists][:id]=>@artist3.id).eager_graph(:related_artists).all.map{|x| x.related_artists.map{|a| a.name}}.flatten.sort.must_equal %w'2 3 4'
-    Artist.filter(Sequel[:artists][:id]=>@artist4.id).eager_graph(:related_artists).all.map{|x| x.related_artists.map{|a| a.name}}.flatten.sort.must_equal %w'1 3 4'
+    Artist.filter(:artists__id=>@artist1.id).eager_graph(:related_artists).all.map{|x| x.related_artists.map{|a| a.name}}.flatten.sort.must_equal %w'1 2 4'
+    Artist.filter(:artists__id=>@artist2.id).eager_graph(:related_artists).all.map{|x| x.related_artists.map{|a| a.name}}.flatten.sort.must_equal %w'1 2 3'
+    Artist.filter(:artists__id=>@artist3.id).eager_graph(:related_artists).all.map{|x| x.related_artists.map{|a| a.name}}.flatten.sort.must_equal %w'2 3 4'
+    Artist.filter(:artists__id=>@artist4.id).eager_graph(:related_artists).all.map{|x| x.related_artists.map{|a| a.name}}.flatten.sort.must_equal %w'1 3 4'
 
     Artist.filter(:related_artists=>@artist1).all.map{|a| a.name}.sort.must_equal %w'1 2 4'
     Artist.filter(:related_artists=>@artist2).all.map{|a| a.name}.sort.must_equal %w'1 2 3'
@@ -349,8 +346,8 @@ describe "Many Through Many Plugin" do
     c.filter(:related_artists=>[@artist1, @artist4]).all.map{|a| a.name}.sort.must_equal %w'1 2 3 4'
     c.exclude(:related_artists=>[@artist1, @artist4]).all.map{|a| a.name}.sort.must_equal %w''
 
-    c.filter(:related_artists=>c.filter(Sequel[:artists][:id]=>@artist1.id)).all.map{|a| a.name}.sort.must_equal %w'1 2 4'
-    c.exclude(:related_artists=>c.filter(Sequel[:artists][:id]=>@artist1.id)).all.map{|a| a.name}.sort.must_equal %w'3'
+    c.filter(:related_artists=>c.filter(:artists__id=>@artist1.id)).all.map{|a| a.name}.sort.must_equal %w'1 2 4'
+    c.exclude(:related_artists=>c.filter(:artists__id=>@artist1.id)).all.map{|a| a.name}.sort.must_equal %w'3'
   end
 
   it "should handle extreme case with 5 join tables" do
@@ -369,6 +366,7 @@ describe "Many Through Many Plugin" do
     Artist[@artist3.id].related_albums.map{|x| x.name}.sort.must_equal %w'A B D'
     Artist[@artist4.id].related_albums.map{|x| x.name}.sort.must_equal %w'B D'
     
+    Artist.plugin :prepared_statements_associations
     Artist[@artist1.id].related_albums.map{|x| x.name}.sort.must_equal %w'A B C'
     Artist[@artist2.id].related_albums.map{|x| x.name}.sort.must_equal %w'A B C D'
     Artist[@artist3.id].related_albums.map{|x| x.name}.sort.must_equal %w'A B D'
@@ -379,10 +377,10 @@ describe "Many Through Many Plugin" do
     Artist.filter(:id=>@artist3.id).eager(:related_albums).all.map{|x| x.related_albums.map{|a| a.name}}.flatten.sort.must_equal %w'A B D'
     Artist.filter(:id=>@artist4.id).eager(:related_albums).all.map{|x| x.related_albums.map{|a| a.name}}.flatten.sort.must_equal %w'B D'
     
-    Artist.filter(Sequel[:artists][:id]=>@artist1.id).eager_graph(:related_albums).all.map{|x| x.related_albums.map{|a| a.name}}.flatten.sort.must_equal %w'A B C'
-    Artist.filter(Sequel[:artists][:id]=>@artist2.id).eager_graph(:related_albums).all.map{|x| x.related_albums.map{|a| a.name}}.flatten.sort.must_equal %w'A B C D'
-    Artist.filter(Sequel[:artists][:id]=>@artist3.id).eager_graph(:related_albums).all.map{|x| x.related_albums.map{|a| a.name}}.flatten.sort.must_equal %w'A B D'
-    Artist.filter(Sequel[:artists][:id]=>@artist4.id).eager_graph(:related_albums).all.map{|x| x.related_albums.map{|a| a.name}}.flatten.sort.must_equal %w'B D'
+    Artist.filter(:artists__id=>@artist1.id).eager_graph(:related_albums).all.map{|x| x.related_albums.map{|a| a.name}}.flatten.sort.must_equal %w'A B C'
+    Artist.filter(:artists__id=>@artist2.id).eager_graph(:related_albums).all.map{|x| x.related_albums.map{|a| a.name}}.flatten.sort.must_equal %w'A B C D'
+    Artist.filter(:artists__id=>@artist3.id).eager_graph(:related_albums).all.map{|x| x.related_albums.map{|a| a.name}}.flatten.sort.must_equal %w'A B D'
+    Artist.filter(:artists__id=>@artist4.id).eager_graph(:related_albums).all.map{|x| x.related_albums.map{|a| a.name}}.flatten.sort.must_equal %w'B D'
 
     Artist.filter(:related_albums=>@album1).all.map{|a| a.name}.sort.must_equal %w'1 2 3'
     Artist.filter(:related_albums=>@album2).all.map{|a| a.name}.sort.must_equal %w'1 2 3 4'
@@ -420,8 +418,8 @@ describe "Many Through Many Plugin" do
     c.exclude(:related_albums=>[@album1, @album3]).all.map{|a| a.name}.sort.must_equal %w'4'
     c.exclude(:related_albums=>[@album2, @album4]).all.map{|a| a.name}.sort.must_equal %w''
 
-    c.filter(:related_albums=>self_join(Album).filter(Sequel[:albums][:id]=>[@album1.id, @album3.id])).all.map{|a| a.name}.sort.must_equal %w'1 2 3'
-    c.exclude(:related_albums=>self_join(Album).filter(Sequel[:albums][:id]=>[@album1.id, @album3.id])).all.map{|a| a.name}.sort.must_equal %w'4'
+    c.filter(:related_albums=>self_join(Album).filter(:albums__id=>[@album1.id, @album3.id])).all.map{|a| a.name}.sort.must_equal %w'1 2 3'
+    c.exclude(:related_albums=>self_join(Album).filter(:albums__id=>[@album1.id, @album3.id])).all.map{|a| a.name}.sort.must_equal %w'4'
   end
 end
 
@@ -472,7 +470,7 @@ end
 describe "Tactical Eager Loading Plugin" do
   before(:all) do
     @db = DB
-    @db.instance_variable_get(:@schemas).clear
+    @db.instance_variable_set(:@schemas, {})
     @db.drop_table?(:albums_artists)
     @db.create_table!(:artists) do
       primary_key :id
@@ -565,15 +563,15 @@ describe "Touch plugin" do
 
   it "should update the timestamp column when touching the record" do
     Album.plugin :touch
-    @album.updated_at.must_be_nil
+    @album.updated_at.must_equal nil
     @album.touch
     @album.updated_at.to_i.must_be_close_to Time.now.to_i, 2
   end
   
-  cspecify "should update the timestamp column for many_to_one associated records when the record is updated or destroyed", [:jdbc, :sqlite] do
+  cspecify "should update the timestamp column for many_to_one associated records when the record is updated or destroyed", [:do, :sqlite], [:jdbc, :sqlite], [:swift] do
     Album.many_to_one :artist
     Album.plugin :touch, :associations=>:artist
-    @artist.updated_at.must_be_nil
+    @artist.updated_at.must_equal nil
     @album.update(:name=>'B')
     ua = @artist.reload.updated_at
     if ua.is_a?(Time)
@@ -590,10 +588,10 @@ describe "Touch plugin" do
     end
   end
 
-  cspecify "should update the timestamp column for one_to_many associated records when the record is updated", [:jdbc, :sqlite] do
+  cspecify "should update the timestamp column for one_to_many associated records when the record is updated", [:do, :sqlite], [:jdbc, :sqlite], [:swift] do
     Artist.one_to_many :albums
     Artist.plugin :touch, :associations=>:albums
-    @album.updated_at.must_be_nil
+    @album.updated_at.must_equal nil
     @artist.update(:name=>'B')
     ua = @album.reload.updated_at
     if ua.is_a?(Time)
@@ -603,11 +601,11 @@ describe "Touch plugin" do
     end
   end
 
-  cspecify "should update the timestamp column for many_to_many associated records when the record is updated", [:jdbc, :sqlite] do
+  cspecify "should update the timestamp column for many_to_many associated records when the record is updated", [:do, :sqlite], [:jdbc, :sqlite], [:swift] do
     Artist.many_to_many :albums
     Artist.plugin :touch, :associations=>:albums
     @artist.add_album(@album)
-    @album.updated_at.must_be_nil
+    @album.updated_at.must_equal nil
     @artist.update(:name=>'B')
     ua = @album.reload.updated_at
     if ua.is_a?(Time)
@@ -719,7 +717,7 @@ describe "Composition plugin" do
 
   it "should return a composed object if the underlying columns have a value" do
     @e1.date.must_equal Date.civil(2010, 2, 15)
-    @e2.date.must_be_nil
+    @e2.date.must_equal nil
   end
 
   it "should decompose the object when saving the record" do
@@ -757,8 +755,8 @@ describe "RcteTree Plugin" do
       @aaab.children.must_equal []
       @aaaaa.children.must_equal []
       
-      @a.parent.must_be_nil
-      @b.parent.must_be_nil
+      @a.parent.must_equal nil
+      @b.parent.must_equal nil
       @aa.parent.must_equal @a
       @ab.parent.must_equal @a
       @ba.parent.must_equal @b
@@ -893,28 +891,28 @@ describe "RcteTree Plugin" do
     
     it "should populate all :parent associations when eagerly loading ancestors for a dataset" do
       nodes = @Node.filter(@Node.primary_key=>[@a.pk, @ba.pk, @aaa.pk, @aaaaa.pk]).order(:name).eager(:ancestors).all
-      nodes[0].associations.fetch(:parent, 1).must_be_nil
+      nodes[0].associations.fetch(:parent, 1).must_equal nil
       nodes[1].associations[:parent].must_equal @aa
       nodes[1].associations[:parent].associations[:parent].must_equal @a
-      nodes[1].associations[:parent].associations[:parent].associations.fetch(:parent, 1).must_be_nil
+      nodes[1].associations[:parent].associations[:parent].associations.fetch(:parent, 1).must_equal nil
       nodes[2].associations[:parent].must_equal @aaaa
       nodes[2].associations[:parent].associations[:parent].must_equal @aaa
       nodes[2].associations[:parent].associations[:parent].associations[:parent].must_equal @aa
       nodes[2].associations[:parent].associations[:parent].associations[:parent].associations[:parent].must_equal @a
-      nodes[2].associations[:parent].associations[:parent].associations[:parent].associations[:parent].associations.fetch(:parent, 1).must_be_nil
+      nodes[2].associations[:parent].associations[:parent].associations[:parent].associations[:parent].associations.fetch(:parent, 1).must_equal nil
       nodes[3].associations[:parent].must_equal @b
-      nodes[3].associations[:parent].associations.fetch(:parent, 1).must_be_nil
+      nodes[3].associations[:parent].associations.fetch(:parent, 1).must_equal nil
     end
     
     it "should populate all :parent associations when lazily loading ancestors" do
       @a.reload
       @a.ancestors
-      @a.associations[:parent].must_be_nil
+      @a.associations[:parent].must_equal nil
       
       @ba.reload
       @ba.ancestors
       @ba.associations[:parent].must_equal @b
-      @ba.associations[:parent].associations.fetch(:parent, 1).must_be_nil
+      @ba.associations[:parent].associations.fetch(:parent, 1).must_equal nil
       
       @ba.reload
       @aaaaa.ancestors
@@ -922,7 +920,7 @@ describe "RcteTree Plugin" do
       @aaaaa.associations[:parent].associations[:parent].must_equal @aaa
       @aaaaa.associations[:parent].associations[:parent].associations[:parent].must_equal @aa
       @aaaaa.associations[:parent].associations[:parent].associations[:parent].associations[:parent].must_equal @a
-      @aaaaa.associations[:parent].associations[:parent].associations[:parent].associations[:parent].associations.fetch(:parent, 1).must_be_nil
+      @aaaaa.associations[:parent].associations[:parent].associations[:parent].associations[:parent].associations.fetch(:parent, 1).must_equal nil
     end
   end
 
@@ -1195,12 +1193,11 @@ describe "AssociationPks plugin" do
     end
     class ::Artist < Sequel::Model
       plugin :association_pks
-      one_to_many :albums, :order=>:id, :delay_pks=>false
+      one_to_many :albums, :order=>:id
     end 
     class ::Album < Sequel::Model
       plugin :association_pks
-      many_to_many :tags, :order=>:id, :delay_pks=>false
-      many_to_many :uat_tags, :order=>Sequel[:tags][:id], :delay_pks=>false, :class=>:Tag, :right_key=>:tag_id, :association_pks_use_associated_table=>true
+      many_to_many :tags, :order=>:id
     end 
     class ::Tag < Sequel::Model
     end 
@@ -1266,10 +1263,6 @@ describe "AssociationPks plugin" do
     Album.order(:id).all.map{|a| a.tag_pks.sort}.must_equal [[@t1, @t2, @t3], [@t2], []]
   end
 
-  it "should return correct associated pks for many_to_many associations using :association_pks_use_associated_table" do
-    Album.order(:id).all.map{|a| a.uat_tag_pks.sort}.must_equal [[@t1, @t2, @t3], [@t2], []]
-  end
-
   it "should return correct associated right-side cpks for one_to_many associations" do
     Album.one_to_many :vocalists, :order=>:first
     Album.order(:id).all.map{|a| a.vocalist_pks.sort}.must_equal [[@v1, @v2, @v3], [], []]
@@ -1277,11 +1270,6 @@ describe "AssociationPks plugin" do
 
   it "should return correct associated right-side cpks for many_to_many associations" do
     Album.many_to_many :vocalists, :join_table=>:albums_vocalists, :right_key=>[:first, :last], :order=>:first
-    Album.order(:id).all.map{|a| a.vocalist_pks.sort}.must_equal [[@v1, @v2, @v3], [@v2], []]
-  end
-
-  it "should return correct associated right-side cpks for many_to_many associations when using :association_pks_use_associated_table" do
-    Album.many_to_many :vocalists, :join_table=>:albums_vocalists, :right_key=>[:first, :last], :order=>Sequel[:vocalists][:first], :association_pks_use_associated_table=>true
     Album.order(:id).all.map{|a| a.vocalist_pks.sort}.must_equal [[@v1, @v2, @v3], [@v2], []]
   end
 
@@ -1295,11 +1283,6 @@ describe "AssociationPks plugin" do
     Vocalist.order(:first, :last).all.map{|a| a.instrument_pks.sort}.must_equal [[@i1, @i2, @i3], [@i2], []]
   end
 
-  it "should return correct associated pks for left-side cpks for many_to_many associations when using :association_pks_use_associated_table" do
-    Vocalist.many_to_many :instruments, :join_table=>:vocalists_instruments, :left_key=>[:first, :last], :order=>:id, :association_pks_use_associated_table=>true
-    Vocalist.order(:first, :last).all.map{|a| a.instrument_pks.sort}.must_equal [[@i1, @i2, @i3], [@i2], []]
-  end
-
   it "should return correct associated right-side cpks for left-side cpks for one_to_many associations" do
     Vocalist.one_to_many :hits, :key=>[:first, :last], :order=>:week
     Vocalist.order(:first, :last).all.map{|a| a.hit_pks.sort}.must_equal [[@h1, @h2, @h3], [], []]
@@ -1310,14 +1293,25 @@ describe "AssociationPks plugin" do
     Vocalist.order(:first, :last).all.map{|a| a.hit_pks.sort}.must_equal [[@h1, @h2, @h3], [@h2], []]
   end
 
-  it "should return correct associated right-side cpks for left-side cpks for many_to_many associations when using :association_pks_use_associated_table" do
-    Vocalist.many_to_many :hits, :join_table=>:vocalists_hits, :left_key=>[:first, :last], :right_key=>[:year, :week], :order=>Sequel[:vocalists_hits][:week], :association_pks_use_associated_table=>true
-    Vocalist.order(:first, :last).all.map{|a| a.hit_pks.sort}.must_equal [[@h1, @h2, @h3], [@h2], []]
-  end
-
-  it "should default to delaying association_pks setter method changes until saving" do
+  it "should handle :delay association option for new instances" do
     album_class = Class.new(Album)
     album_class.many_to_many :tags, :clone=>:tags, :delay_pks=>true, :join_table=>:albums_tags, :left_key=>:album_id
+    album = album_class.new(:name=>'test album')
+    album.tag_pks.must_equal []
+    album.tag_pks = [@t1, @t2]
+    album.tag_pks.must_equal [@t1, @t2]
+    album.save
+    album_class.with_pk!(album.pk).tag_pks.sort.must_equal [@t1, @t2]
+
+    album.tag_pks = []
+    album.tag_pks.must_equal []
+    album.save
+    album_class.with_pk!(album.pk).tag_pks.sort.must_equal []
+  end
+
+  it "should handle :delay=>:all association option for existing instances" do
+    album_class = Class.new(Album)
+    album_class.many_to_many :tags, :clone=>:tags, :delay_pks=>:always, :join_table=>:albums_tags, :left_key=>:album_id
     album = album_class.with_pk!(@al1)
     album.tag_pks.sort.must_equal [@t1, @t2, @t3]
     album.tag_pks = [@t1, @t2]
@@ -1374,7 +1368,7 @@ describe "AssociationPks plugin" do
 
   it "should set associated right-side cpks correctly for a one_to_many association" do
     Album.use_transactions = true
-    Album.one_to_many :vocalists, :order=>:first, :delay_pks=>false
+    Album.one_to_many :vocalists, :order=>:first
     Album.order(:id).all.map{|a| a.vocalist_pks.sort}.must_equal [[@v1, @v2, @v3], [], []]
 
     Album[@al2].vocalist_pks = [@v1, @v3]
@@ -1395,7 +1389,7 @@ describe "AssociationPks plugin" do
 
   it "should set associated right-side cpks correctly for a many_to_many association" do
     Album.use_transactions = true
-    Album.many_to_many :vocalists, :join_table=>:albums_vocalists, :right_key=>[:first, :last], :order=>:first, :delay_pks=>false
+    Album.many_to_many :vocalists, :join_table=>:albums_vocalists, :right_key=>[:first, :last], :order=>:first
 
     @db[:albums_vocalists].filter(:album_id=>@al1).select_order_map([:first, :last]).must_equal [@v1, @v2, @v3]
     Album[@al1].vocalist_pks = [@v1, @v3]
@@ -1418,7 +1412,7 @@ describe "AssociationPks plugin" do
 
   it "should set associated pks correctly with left-side cpks for a one_to_many association" do
     Vocalist.use_transactions = true
-    Vocalist.one_to_many :instruments, :key=>[:first, :last], :order=>:id, :delay_pks=>false
+    Vocalist.one_to_many :instruments, :key=>[:first, :last], :order=>:id
     Vocalist.order(:first, :last).all.map{|a| a.instrument_pks.sort}.must_equal [[@i1, @i2, @i3], [], []]
 
     Vocalist[@v2].instrument_pks = [@i1, @i3]
@@ -1439,7 +1433,7 @@ describe "AssociationPks plugin" do
 
   it "should set associated pks correctly with left-side cpks for a many_to_many association" do
     Vocalist.use_transactions = true
-    Vocalist.many_to_many :instruments, :join_table=>:vocalists_instruments, :left_key=>[:first, :last], :order=>:id, :delay_pks=>false
+    Vocalist.many_to_many :instruments, :join_table=>:vocalists_instruments, :left_key=>[:first, :last], :order=>:id
 
     @db[:vocalists_instruments].filter([:first, :last]=>[@v1]).select_order_map(:instrument_id).must_equal [@i1, @i2, @i3]
     Vocalist[@v1].instrument_pks = [@i1, @i3]
@@ -1462,7 +1456,7 @@ describe "AssociationPks plugin" do
 
   it "should set associated right-side cpks correctly with left-side cpks for a one_to_many association" do
     Vocalist.use_transactions = true
-    Vocalist.one_to_many :hits, :key=>[:first, :last], :order=>:week, :delay_pks=>false
+    Vocalist.one_to_many :hits, :key=>[:first, :last], :order=>:week
     Vocalist.order(:first, :last).all.map{|a| a.hit_pks.sort}.must_equal [[@h1, @h2, @h3], [], []]
 
     Vocalist[@v2].hit_pks = [@h1, @h3]
@@ -1483,7 +1477,7 @@ describe "AssociationPks plugin" do
 
   it "should set associated right-side cpks correctly with left-side cpks for a many_to_many association" do
     Vocalist.use_transactions = true
-    Vocalist.many_to_many :hits, :join_table=>:vocalists_hits, :left_key=>[:first, :last], :right_key=>[:year, :week], :order=>:week, :delay_pks=>false
+    Vocalist.many_to_many :hits, :join_table=>:vocalists_hits, :left_key=>[:first, :last], :right_key=>[:year, :week], :order=>:week
 
     @db[:vocalists_hits].filter([:first, :last]=>[@v1]).select_order_map([:year, :week]).must_equal [@h1, @h2, @h3]
     Vocalist[@v1].hit_pks = [@h1, @h3]
@@ -1534,12 +1528,12 @@ describe "List plugin without a scope" do
 
   it "should define prev and next" do
     i = @c[:name => "abc"]
-    i.prev.must_be_nil
+    i.prev.must_equal nil
     i = @c[:name => "def"]
     i.prev.must_equal @c[:name => "abc"]
     i.next.must_equal @c[:name => "hig"]
     i = @c[:name => "hig"]
-    i.next.must_be_nil
+    i.next.must_equal nil
   end
 
   it "should define move_to" do
@@ -1629,10 +1623,10 @@ describe "List plugin with a scope" do
     @c[:name => "P3"].prev(2).name.must_equal 'P1'
     @c[:name => "P2"].prev(-1).name.must_equal 'P3'
 
-    @c[:name => "Ps"].prev.must_be_nil
-    @c[:name => "Au"].next.must_be_nil
-    @c[:name => "P1"].prev.must_be_nil
-    @c[:name => "P3"].next.must_be_nil
+    @c[:name => "Ps"].prev.must_equal nil
+    @c[:name => "Au"].next.must_equal nil
+    @c[:name => "P1"].prev.must_equal nil
+    @c[:name => "P3"].next.must_equal nil
   end
 
   it "should define move_to" do
@@ -1825,6 +1819,7 @@ describe "Sequel::Plugins::PreparedStatements" do
       Integer :i
     end
     @c = Class.new(Sequel::Model(@db[:ps_test]))
+    @c.plugin :prepared_statements_with_pk
   end
   before do
     @c.dataset.delete
@@ -1838,31 +1833,31 @@ describe "Sequel::Plugins::PreparedStatements" do
   it "should work with looking up using Model.[]" do 
     @c[@foo.id].must_equal @foo
     @c[@bar.id].must_equal @bar
-    @c[0].must_be_nil
-    @c[nil].must_be_nil
+    @c[0].must_equal nil
+    @c[nil].must_equal nil
   end
 
   it "should work with looking up using Dataset#with_pk" do 
     @c.dataset.with_pk(@foo.id).must_equal @foo
     @c.dataset.with_pk(@bar.id).must_equal @bar
-    @c.dataset.with_pk(0).must_be_nil
-    @c.dataset.with_pk(nil).must_be_nil
+    @c.dataset.with_pk(0).must_equal nil
+    @c.dataset.with_pk(nil).must_equal nil
 
-    @c.dataset.filter(:i=>0).with_pk(@foo.id).must_be_nil
+    @c.dataset.filter(:i=>0).with_pk(@foo.id).must_equal nil
     @c.dataset.filter(:i=>10).with_pk(@foo.id).must_equal @foo
     @c.dataset.filter(:i=>20).with_pk(@bar.id).must_equal @bar
-    @c.dataset.filter(:i=>10).with_pk(nil).must_be_nil
+    @c.dataset.filter(:i=>10).with_pk(nil).must_equal nil
     @c.dataset.filter(:name=>'foo').with_pk(@foo.id).must_equal @foo
     @c.dataset.filter(:name=>'bar').with_pk(@bar.id).must_equal @bar
-    @c.dataset.filter(:name=>'baz').with_pk(@bar.id).must_be_nil
-    @c.dataset.filter(:name=>'bar').with_pk(nil).must_be_nil
+    @c.dataset.filter(:name=>'baz').with_pk(@bar.id).must_equal nil
+    @c.dataset.filter(:name=>'bar').with_pk(nil).must_equal nil
   end
 
   it "should work with Model#destroy" do 
     @foo.destroy
     @bar.destroy
-    @c[@foo.id].must_be_nil
-    @c[@bar.id].must_be_nil
+    @c[@foo.id].must_equal nil
+    @c[@bar.id].must_equal nil
   end
 
   it "should work with Model#update" do 
@@ -1898,8 +1893,9 @@ describe "Sequel::Plugins::PreparedStatements with schema changes" do
     @c = Class.new(Sequel::Model(@db[:ps_test]))
     @c.many_to_one :ps_test, :key=>:id, :class=>@c
     @c.one_to_many :ps_tests, :key=>:id, :class=>@c
-    @c.many_to_many :mps_tests, :left_key=>:id, :right_key=>:id, :class=>@c, :join_table=>Sequel[:ps_test].as(:x)
+    @c.many_to_many :mps_tests, :left_key=>:id, :right_key=>:id, :class=>@c, :join_table=>:ps_test___x
     @c.plugin :prepared_statements
+    @c.plugin :prepared_statements_associations
   end
   after do
     @db.drop_table?(:ps_test)
@@ -1946,6 +1942,7 @@ describe "Caching plugins" do
   end
   before do
     @Album = Class.new(Sequel::Model(@db[:albums]))
+    @Album.plugin :many_to_one_pk_lookup
   end
   after(:all) do
     @db.drop_table?(:albums, :artists)
@@ -1955,8 +1952,8 @@ describe "Caching plugins" do
     it "should work with looking up using Model.[]" do 
       @Artist[1].must_be_same_as(@Artist[1])
       @Artist[:id=>1].must_equal @Artist[1]
-      @Artist[0].must_be_nil
-      @Artist[nil].must_be_nil
+      @Artist[0].must_equal nil
+      @Artist[nil].must_equal nil
     end
 
     it "should work with lookup up many_to_one associated objects" do 
@@ -1989,20 +1986,13 @@ describe "Caching plugins" do
     end
 
     include CachingPluginSpecs
-
-    it "should have first retrieve correct values" do 
-      @Artist.first.must_equal @Artist.load(:id=>1)
-      @Artist.first(1).must_equal [@Artist.load(:id=>1)]
-      @Artist.first(:id=>1).must_equal @Artist.load(:id=>1)
-      @Artist.first{id =~ 1}.must_equal @Artist.load(:id=>1)
-    end
   end
 end
 
 describe "Sequel::Plugins::ConstraintValidations" do
   before(:all) do
     @db = DB
-    @db.extension(:constraint_validations) unless @db.frozen?
+    @db.extension(:constraint_validations)
     @db.drop_table?(:sequel_constraint_validations)
     @db.create_constraint_validations_table
     @ds = @db[:cv_test]
@@ -2024,20 +2014,17 @@ describe "Sequel::Plugins::ConstraintValidations" do
       includes %w'abc def', :inc, opts.merge(:name=>:i)
       unique :uniq, opts.merge(:name=>:u)
       max_length 6, :minlen, opts.merge(:name=>:maxl2)
-      operator :<, 'm', :exactlen, opts.merge(:name=>:lt)
-      operator :>=, 5, :num, opts.merge(:name=>:gte)
     end
-    @valid_row = {:pre=>'a', :exactlen=>'12345', :minlen=>'12345', :maxlen=>'12345', :lenrange=>'1234', :lik=>'fooabc', :ilik=>'FooABC', :inc=>'abc', :uniq=>'u', :num=>5}
+    @valid_row = {:pre=>'a', :exactlen=>'12345', :minlen=>'12345', :maxlen=>'12345', :lenrange=>'1234', :lik=>'fooabc', :ilik=>'FooABC', :inc=>'abc', :uniq=>'u'}
     @violations = [
       [:pre, [nil, '', ' ']],
-      [:exactlen, [nil, '', '1234', '123456', 'n1234']],
+      [:exactlen, [nil, '', '1234', '123456']],
       [:minlen, [nil, '', '1234']],
       [:maxlen, [nil, '123456']],
       [:lenrange, [nil, '', '12', '123456']],
       [:lik, [nil, '', 'fo', 'fotabc', 'FOOABC']],
       [:ilik, [nil, '', 'fo', 'fotabc']],
       [:inc, [nil, '', 'ab', 'abcd']],
-      [:num, [nil, 3, 4]],
     ]
 
     if @regexp
@@ -2050,11 +2037,11 @@ describe "Sequel::Plugins::ConstraintValidations" do
   end
 
   ConstraintValidationsSpecs = shared_description do
-    cspecify "should set up constraints that work even outside the model", [proc{|db| !db.mariadb? || db.server_version <= 100200}, :mysql] do 
+    cspecify "should set up constraints that work even outside the model", :mysql do 
       @ds.insert(@valid_row)
 
       # Test for unique constraint
-      proc{@ds.insert(@valid_row)}.must_raise(Sequel::DatabaseError)
+      proc{@ds.insert(@valid_row)}.must_raise(Sequel::DatabaseError, Sequel::UniqueConstraintViolation, Sequel::ConstraintViolation)
 
       @ds.delete
       @violations.each do |col, vals|
@@ -2064,7 +2051,7 @@ describe "Sequel::Plugins::ConstraintValidations" do
           next if val.nil? && @validation_opts[:allow_nil]
           next if val == '' && @validation_opts[:allow_nil] && @db.database_type == :oracle
           try[col] = val
-          proc{@ds.insert(try)}.must_raise(Sequel::DatabaseError)
+          proc{@ds.insert(try)}.must_raise(Sequel::DatabaseError, Sequel::CheckConstraintViolation, Sequel::ConstraintViolation)
         end
       end
 
@@ -2074,7 +2061,6 @@ describe "Sequel::Plugins::ConstraintValidations" do
     end
 
     it "should set up automatic validations inside the model" do 
-      skip if @db.frozen?
       c = Class.new(Sequel::Model(@ds))
       c.plugin :constraint_validations
       c.dataset.delete
@@ -2115,7 +2101,6 @@ describe "Sequel::Plugins::ConstraintValidations" do
           String :ilik
           String :inc
           String :uniq, :null=>false
-          Integer :num
           validate(&validate_block)
         end
       end
@@ -2161,7 +2146,6 @@ describe "Sequel::Plugins::ConstraintValidations" do
           if regexp
             add_column :form, String
           end
-          add_column :num, Integer
           validate(&validate_block)
         end
       end
@@ -2199,8 +2183,7 @@ describe "date_arithmetic extension" do
 
   before(:all) do
     @db = DB
-    @db.extension(:date_arithmetic) unless @db.frozen?
-    skip if @db.database_type == :sqlite && @db.frozen?
+    @db.extension(:date_arithmetic)
     if @db.database_type == :sqlite
       @db.use_timestamp_timezones = false
     end
@@ -2275,35 +2258,5 @@ describe "date_arithmetic extension" do
     @check.call(:date_sub, @dt, @h0, @dt)
     @check.call(:date_sub, @dt, @h1, @s1)
     @check.call(:date_sub, @dt, @h2, @s2)
-  end
-end
-
-describe "string_agg extension" do
-  before(:all) do
-    @db = DB
-    @db.extension(:string_agg) unless @db.frozen?
-    @db.create_table!(:string_agg_test) do
-      Integer :id
-      String :s
-      Integer :o
-    end
-    @db[:string_agg_test].import([:id, :s, :o], [[1, 'a', 3], [1, 'a', 3], [1, 'b', 5], [1, 'c', 4], [2, 'aa', 2], [2, 'bb', 1]])
-    @ds = @db[:string_agg_test].select_group(:id).order(:id)
-  end
-  after(:all) do
-    @db.drop_table?(:string_agg_test)
-  end
-
-  cspecify "should have string_agg return aggregated concatenation", :mssql, :sqlite, :derby do
-    h = @ds.select_append(Sequel.string_agg(:s).as(:v)).to_hash(:id, :v)
-    h[1].must_match(/\A[abc],[abc],[abc],[abc]\z/)
-    h[2].must_match(/\A(aa|bb),(aa|bb)\z/)
-
-    @ds.select_append(Sequel.string_agg(:s).order(:o).as(:v)).map([:id, :v]).must_equal [[1, 'a,a,c,b'], [2, 'bb,aa']]
-    @ds.select_append(Sequel.string_agg(:s, '-').order(:o).as(:v)).map([:id, :v]).must_equal [[1, 'a-a-c-b'], [2, 'bb-aa']]
-  end
-
-  cspecify "should have string_agg return aggregated concatenation for distinct values", :mssql, :sqlite, :oracle, :db2, :derby do
-    @ds.select_group(:id).select_append(Sequel.string_agg(:s).order(:s).distinct.as(:v)).map([:id, :v]).must_equal [[1, 'a,b,c'], [2, 'aa,bb']]
   end
 end

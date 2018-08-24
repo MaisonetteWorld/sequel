@@ -5,7 +5,7 @@
 #
 # :float :: use to_f instead of Float()
 # :integer :: use to_i instead of Integer()
-# :decimal :: use 0.0 for unsupported strings
+# :decimal :: don't check string conversion with Float()
 # :string :: silently allow hash and array conversion to string
 #
 # To load the extension into the database:
@@ -17,8 +17,6 @@
 #
 module Sequel
   module LooserTypecasting
-    private
-
     # Typecast the value to a Float using to_f instead of Kernel.Float
     def typecast_value_float(value)
       value.to_f
@@ -34,18 +32,14 @@ module Sequel
       value.to_s
     end
 
-    if RUBY_VERSION >= '2.4'
-      def _typecast_value_string_to_decimal(value)
-        BigDecimal(value)
-      rescue
-        BigDecimal('0.0')
+    # Typecast the value to a BigDecimal, without checking if strings
+    # have a valid format.
+    def typecast_value_decimal(value)
+      if value.is_a?(String)
+        BigDecimal.new(value)
+      else
+        super
       end
-    else
-      # :nocov:
-      def _typecast_value_string_to_decimal(value)
-        BigDecimal(value)
-      end
-      # :nocov:
     end
   end
 

@@ -13,7 +13,7 @@
 #
 # Usage:
 #
-#   ds = DB[:items].nullify.where(a: :b).select(:c)
+#   ds = DB[:items].nullify.where(:a=>:b).select(:c)
 #   ds.sql # => "SELECT c FROM items WHERE (a = b)"
 #   ds.all # => [] # no query sent to the database
 #
@@ -41,9 +41,12 @@ module Sequel
     module Nullifiable
       # Return a cloned nullified dataset.
       def nullify
-        cached_dataset(:_nullify_ds) do
-          with_extend(NullDataset)
-        end
+        clone.nullify!
+      end
+
+      # Nullify the current dataset
+      def nullify!
+        extend NullDataset
       end
     end
 
@@ -51,10 +54,7 @@ module Sequel
       # Create a new dataset from the dataset (which won't
       # be nulled) to get the columns if they aren't already cached.
       def columns
-        if cols = _columns
-          return cols
-        end
-        self.columns = db.dataset.clone(@opts).columns
+        @columns ||= db.dataset.clone(@opts).columns
       end
 
       # Return 0 without sending a database query.

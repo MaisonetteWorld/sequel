@@ -11,7 +11,7 @@ module Sequel
     #
     #   class Item < Sequel::Model(:items)
     #     plugin :list # will use :position field for position
-    #     plugin :list, field: :pos # will use :pos field for position
+    #     plugin :list, :field=>:pos # will use :pos field for position
     #   end
     #   
     #   item = Item[1]
@@ -38,41 +38,34 @@ module Sequel
     # For example, if each item has a +user_id+ field, and you want every user
     # to have their own list:
     #
-    #   Item.plugin :list, scope: :user_id
+    #   Item.plugin :list, :scope=>:user_id
     # 
     # Note that using this plugin modifies the order of the model's dataset to
     # sort by the position and scope fields.  Also note that this plugin is subject to
     # race conditions, and is not safe when concurrent modifications are made
     # to the same list.
     #
-    # Note that by default, unlike ruby arrays, the list plugin assumes the first
-    # entry in the list has position 1, not position 0.
-    #
-    # You can change this by providing an integer <tt>:top</tt> option:
-    #
-    #   Item.plugin :list, top: 0
+    # Additionally, note that unlike ruby arrays, the list plugin assumes that the
+    # first entry in the list has position 1, not position 0.
     #
     # Copyright (c) 2007-2010 Sharon Rosner, Wayne E. Seguin, Aman Gupta, Adrian Madrid, Jeremy Evans
     module List
-      # Set the +position_field+, +scope_proc+ and +top_of_list+ attributes for the model,
-      # using the <tt>:field</tt>, <tt>:scope</tt>, and <tt>:top</tt> options, respectively.
+      # Set the +position_field+ and +scope_proc+ attributes for the model,
+      # using the <tt>:field</tt> and <tt>:scope</tt> options, respectively.
       # The <tt>:scope</tt> option can be a symbol, array of symbols, or a proc that
       # accepts a model instance and returns a dataset representing the list.
       # Also, modify the model dataset's order to order by the position and scope fields.
       def self.configure(model, opts = OPTS)
         model.position_field = opts[:field] || :position
         model.dataset = model.dataset.order_prepend(model.position_field)
-        model.instance_exec do
-          @top_of_list = opts[:top] || 1
-        end
         
         model.scope_proc = case scope = opts[:scope]
         when Symbol
           model.dataset = model.dataset.order_prepend(scope)
-          proc{|obj| obj.model.where(scope=>obj.public_send(scope))}
+          proc{|obj| obj.model.filter(scope=>obj.send(scope))}
         when Array
           model.dataset = model.dataset.order_prepend(*scope)
-          proc{|obj| obj.model.where(scope.map{|s| [s, obj.get_column_value(s)]})}
+          proc{|obj| obj.model.filter(scope.map{|s| [s, obj.get_column_value(s)]})}
         else
           scope
         end
@@ -87,10 +80,7 @@ module Sequel
         # proc should accept an instance and return a dataset representing the list.
         attr_accessor :scope_proc
 
-        # An Integer to use as the position of the top of the list. Defaults to 1.
-        attr_reader :top_of_list
-
-        Plugins.inherited_instance_variables(self, :@position_field=>nil, :@scope_proc=>nil, :@top_of_list=>nil)
+        Plugins.inherited_instance_variables(self, :@position_field=>nil, :@scope_proc=>nil)
       end
 
       module InstanceMethods
@@ -104,7 +94,7 @@ module Sequel
         def after_destroy
           super
 
-          f = Sequel[position_field]
+          f = Sequel.expr(position_field)
           list_dataset.where(f > position_value).update(f => f - 1)
         end
 
@@ -124,22 +114,20 @@ module Sequel
           move_to(position_value + n)
         end
 
-        # Move this instance to the given place in the list.  If lp is not
-        # given or greater than the last list position, uses the last list
-        # position.  If lp is less than the top list position, uses the
-        # top list position.
+        # Move this instance to the given place in the list.  Raises an
+        # exception if target is less than 1 or greater than the last position in the list.
         def move_to(target, lp = nil)
           current = position_value
           if target != current
             checked_transaction do
               ds = list_dataset
               op, ds = if target < current
-                target = model.top_of_list if target < model.top_of_list
-                [:+, ds.where(position_field=>target...current)]
+                target = 1 if target < 1
+                [:+, ds.filter(position_field=>target...current)]
               else
                 lp ||= last_position
                 target = lp if target > lp
-                [:-, ds.where(position_field=>(current + 1)..target)]
+                [:-, ds.filter(position_field=>(current + 1)..target)]
               end
               ds.update(position_field => Sequel::SQL::NumericExpression.new(op, position_field, 1))
               update(position_field => target)
@@ -154,9 +142,9 @@ module Sequel
           move_to(lp, lp)
         end
 
-        # Move this instance to the top (first position, usually position 1) of the list.
+        # Move this instance to the top (first position, position 1) of the list.
         def move_to_top
-          move_to(model.top_of_list)
+          move_to(1)
         end
 
         # Move this instance the given number of places up in the list, or 1 place
@@ -182,16 +170,16 @@ module Sequel
           self.next(n * -1)
         end
 
+        private
+
         # Set the value of the position_field to the maximum value plus 1 unless the
         # position field already has a value.
-        def before_validation
+        def _before_validation
           unless get_column_value(position_field)
             set_column_value("#{position_field}=", list_dataset.max(position_field).to_i+1)
           end
           super
         end
-
-        private
 
         # The model's position field, an instance method for ease of use.
         def position_field

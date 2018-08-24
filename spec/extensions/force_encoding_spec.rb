@@ -1,8 +1,9 @@
-require_relative "spec_helper"
-
+require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+if RUBY_VERSION >= '1.9.0'
 describe "force_encoding plugin" do
   before do
-    @c = Class.new(Sequel::Model)
+    @c = Class.new(Sequel::Model) do
+    end
     @c.columns :id, :x
     @c.plugin :force_encoding, 'UTF-8'
     @e1 = Encoding.find('UTF-8')
@@ -22,20 +23,6 @@ describe "force_encoding plugin" do
     o = @c.new(:x=>s)
     o.x.must_equal 'blah'
     o.x.encoding.must_equal @e1
-  end
-  
-  it "should not force encoding of blobs to given encoding on load" do
-    s = Sequel.blob('blah'.dup.force_encoding('BINARY'))
-    o = @c.load(:id=>1, :x=>s)
-    o.x.must_equal 'blah'
-    o.x.encoding.must_equal Encoding.find('BINARY')
-  end
-  
-  it "should not force encoding of blobs to given encoding when setting column values" do
-    s = Sequel.blob('blah'.dup.force_encoding('BINARY'))
-    o = @c.new(:x=>s)
-    o.x.must_equal 'blah'
-    o.x.encoding.must_equal Encoding.find('BINARY')
   end
   
   it "should work correctly when given a frozen string" do
@@ -96,14 +83,13 @@ describe "force_encoding plugin" do
   
   it "should work when saving new model instances" do
     o = @c.new
-    @c.dataset = DB[:a].with_extend do
-      def first
-        s = 'blah'.dup
-        s.force_encoding('US-ASCII')
-        {:id=>1, :x=>s}
-      end
+    ds = DB[:a]
+    def ds.first
+      s = 'blah'.dup
+      s.force_encoding('US-ASCII')
+      {:id=>1, :x=>s}
     end
-    @c.instance_variable_set(:@fast_pk_lookup_sql, nil)
+    @c.dataset = ds
     o.save
     o.x.must_equal 'blah'
     o.x.encoding.must_equal @e1
@@ -111,16 +97,18 @@ describe "force_encoding plugin" do
   
   it "should work when refreshing model instances" do
     o = @c.load(:id=>1, :x=>'as'.dup)
-    @c.dataset = DB[:a].with_extend do
-      def first
-        s = 'blah'.dup
-        s.force_encoding('US-ASCII')
-        {:id=>1, :x=>s}
-      end
+    ds = DB[:a]
+    def ds.first
+      s = 'blah'.dup
+      s.force_encoding('US-ASCII')
+      {:id=>1, :x=>s}
     end
-    @c.instance_variable_set(:@fast_pk_lookup_sql, nil)
+    @c.dataset = ds
     o.refresh
     o.x.must_equal 'blah'
     o.x.encoding.must_equal @e1
   end
 end 
+else
+  skip_warn "force_encoding plugin: only works on ruby 1.9+"
+end

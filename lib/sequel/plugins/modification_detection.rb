@@ -17,9 +17,6 @@ module Sequel
     # Note that for this plugin to work correctly, the column values must
     # correctly implement the #hash method, returning the same value if
     # the object is equal, and a different value if the object is not equal.
-    # As this solely uses hash values to check for modification, there may
-    # be cases where a modification is made and the hash value is the same,
-    # resulting in a false negative.
     #
     # Note that this plugin causes a performance hit for all retrieved
     # objects, so it shouldn't be used in cases where performance is a
@@ -58,20 +55,13 @@ module Sequel
         # Detect which columns have been modified by comparing the cached hash
         # value to the hash of the current value.
         def changed_columns
-          changed = super
+          cc = super
+          changed = []
+          v = @values
           if vh = @values_hashes
-            values = @values
-            changed = changed.dup if frozen?
-            vh.each do |c, v|
-              match = values.has_key?(c) && v == values[c].hash
-              if changed.include?(c)
-                changed.delete(c) if match
-              else
-                changed << c unless match
-              end
-            end
+            (vh.keys - cc).each{|c| changed << c unless v.has_key?(c) && vh[c] == v[c].hash}
           end
-          changed
+          cc + changed
         end
 
         private

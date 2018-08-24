@@ -3,7 +3,7 @@
 require 'active_model'
 module Sequel
   module Plugins
-    # The active_model plugin makes Sequel::Model objects
+    # The ActiveModel plugin makes Sequel::Model objects
     # pass the ActiveModel::Lint tests, which should
     # hopefully mean full ActiveModel compliance.  This should
     # allow the full support of Sequel::Model objects in Rails 3+.
@@ -28,14 +28,6 @@ module Sequel
 
       module ClassMethods
         include ::ActiveModel::Naming
-
-        # Cache model_name and to_partial path value before freezing.
-        def freeze
-          model_name
-          _to_partial_path
-
-          super
-        end
         
         # Class level cache for to_partial_path.
         def _to_partial_path
@@ -44,11 +36,21 @@ module Sequel
       end
 
       module InstanceMethods
+        # The default string to join composite primary keys with in to_param.
+        DEFAULT_TO_PARAM_JOINER = '-'.freeze
+      
         # Record that an object was destroyed, for later use by
         # destroyed?
         def after_destroy
           super
           @destroyed = true
+        end
+
+        # Mark current instance as destroyed if the transaction in which this
+        # instance is created is rolled back.
+        def before_create
+          db.after_rollback{@destroyed = true}
+          super
         end
 
         # Return ::ActiveModel::Name instance for the class.
@@ -58,16 +60,7 @@ module Sequel
 
         # False if the object is new? or has been destroyed, true otherwise.
         def persisted?
-          return false if new?
-          return false if defined?(@destroyed)
-
-          if defined?(@rollback_checker)
-            if @rollback_checker.call
-              return false
-            end
-          end
-          
-          true
+          !new? && @destroyed != true
         end
         
         # An array of primary key values, or nil if the object is not persisted.
@@ -79,7 +72,7 @@ module Sequel
           end
         end
 
-        # With the active_model plugin, Sequel model objects are already
+        # With the ActiveModel plugin, Sequel model objects are already
         # compliant, so this returns self.
         def to_model
           self
@@ -100,15 +93,6 @@ module Sequel
         
         private
 
-        # For new objects, add a rollback checker to check if the transaction
-        # in which this instance is created is rolled back.
-        def _save(opts)
-          if new? && db.in_transaction?(opts)
-            @rollback_checker = db.rollback_checker(opts)
-          end
-          super
-        end
-
         # Use ActiveModel compliant errors class.
         def errors_class
           Errors
@@ -116,7 +100,7 @@ module Sequel
         
         # The string to use to join composite primary key param strings.
         def to_param_joiner
-          '-'
+          DEFAULT_TO_PARAM_JOINER
         end
       end
     end

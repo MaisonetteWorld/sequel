@@ -1,12 +1,10 @@
-require_relative "spec_helper"
+require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
 
 Sequel.extension :pg_array, :pg_array_ops, :pg_hstore, :pg_hstore_ops
 
 describe "Sequel::Postgres::HStoreOp" do
   before do
-    @db = Sequel.connect('mock://postgres')
-    @db.extend_datasets{def quote_identifiers?; false end}
-    @ds = @db.dataset
+    @ds = Sequel.connect('mock://postgres', :quote_identifiers=>false).dataset
     @h = Sequel.hstore_op(:h)
   end
 

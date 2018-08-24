@@ -1,6 +1,6 @@
 # frozen-string-literal: true
 
-require_relative '../shared/mssql'
+Sequel.require 'adapters/shared/mssql'
 
 module Sequel
   module ODBC
@@ -12,17 +12,21 @@ module Sequel
       end
     end
 
+    # Database and Dataset instance methods for MSSQL specific
+    # support via ODBC.
     module MSSQL
       module DatabaseMethods
+        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::MSSQL::DatabaseMethods
-
+        LAST_INSERT_ID_SQL='SELECT SCOPE_IDENTITY()'.freeze
+        
+        # Return the last inserted identity value.
         def execute_insert(sql, opts=OPTS)
           synchronize(opts[:server]) do |conn|
             begin
-              log_connection_yield(sql, conn){conn.do(sql)}
+              log_yield(sql){conn.do(sql)}
               begin
-                last_insert_id_sql = 'SELECT SCOPE_IDENTITY()'
-                s = log_connection_yield(last_insert_id_sql, conn){conn.run(last_insert_id_sql)}
+                s = log_yield(LAST_INSERT_ID_SQL){conn.run(LAST_INSERT_ID_SQL)}
                 if (rows = s.fetch_all) and (row = rows.first) and (v = row.first)
                   Integer(v)
                 end
@@ -38,18 +42,20 @@ module Sequel
       class Dataset < ODBC::Dataset
         include Sequel::MSSQL::DatasetMethods
 
+        # Use ODBC format, not Microsoft format, as the ODBC layer does
+        # some translation.  MSSQL version is over-ridden to allow 3 millisecond decimal places        
+        TIMESTAMP_FORMAT="{ts '%Y-%m-%d %H:%M:%S%N'}".freeze
+
         private
 
-        # Use ODBC format, not Microsoft format, as the ODBC layer does
-        # some translation, but allow for millisecond precision.
         def default_timestamp_format
-          "{ts '%Y-%m-%d %H:%M:%S%N'}"
+          TIMESTAMP_FORMAT
         end
 
         # Use ODBC format, not Microsoft format, as the ODBC layer does
         # some translation.
         def literal_date(v)
-          v.strftime("{d '%Y-%m-%d'}")
+          v.strftime(ODBC_DATE_FORMAT)
         end
       end
     end

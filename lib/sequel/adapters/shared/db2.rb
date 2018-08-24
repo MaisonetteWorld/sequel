@@ -1,15 +1,24 @@
 # frozen-string-literal: true
 
-require_relative '../utils/emulate_offset_with_row_number'
+Sequel.require 'adapters/utils/emulate_offset_with_row_number'
 
 module Sequel
   module DB2
-    Sequel::Database.set_shared_adapter_scheme(:db2, self)
+    @use_clob_as_blob = false
+
+    class << self
+      # Whether to use clob as the generic File type, true by default.
+      attr_accessor :use_clob_as_blob
+    end
 
     module DatabaseMethods
-      # Whether to use clob as the generic File type, false by default.
-      attr_accessor :use_clob_as_blob
+      extend Sequel::Database::ResetIdentifierMangling
 
+      AUTOINCREMENT = 'GENERATED ALWAYS AS IDENTITY'.freeze
+      NOT_NULL      = ' NOT NULL'.freeze
+      NULL          = ''.freeze
+
+      # DB2 always uses :db2 as it's database type
       def database_type
         :db2
       end
@@ -17,16 +26,10 @@ module Sequel
       # Return the database version as a string.  Don't rely on this,
       # it may return an integer in the future.
       def db2_version
-        return @db2_version if defined?(@db2_version)
+        return @db2_version if @db2_version
         @db2_version = metadata_dataset.with_sql("select service_level from sysibmadm.env_inst_info").first[:service_level]
       end
       alias_method :server_version, :db2_version
-
-      def freeze
-        db2_version
-        offset_strategy
-        super
-      end
 
       # Use SYSIBM.SYSCOLUMNS to get the information on the tables.
       def schema_parse_table(table, opts = OPTS)
@@ -69,27 +72,15 @@ module Sequel
       # Use SYSCAT.INDEXES to get the indexes for the table
       def indexes(table, opts = OPTS)
         m = output_identifier_meth
-        table = table.value if table.is_a?(Sequel::SQL::Identifier)
         indexes = {}
         metadata_dataset.
-         from(Sequel[:syscat][:indexes]).
+         from(:syscat__indexes).
          select(:indname, :uniquerule, :colnames).
          where(:tabname=>input_identifier_meth.call(table), :system_required=>0).
          each do |r|
           indexes[m.call(r[:indname])] = {:unique=>(r[:uniquerule]=='U'), :columns=>r[:colnames][1..-1].split('+').map{|v| m.call(v)}}
         end
         indexes
-      end
-
-      def offset_strategy
-        return @offset_strategy if defined?(@offset_strategy)
-
-        @offset_strategy = case strategy = opts[:offset_strategy].to_s
-        when "limit_offset", "offset_fetch"
-          opts[:offset_strategy] = strategy.to_sym
-        else
-          opts[:offset_strategy] = :emulate
-        end
       end
 
       # DB2 supports transaction isolation levels.
@@ -118,6 +109,7 @@ module Sequel
 
       private
 
+      # Handle DB2 specific alter table operations.
       def alter_table_sql(table, op)
         case op[:op]
         when :add_column
@@ -125,7 +117,7 @@ module Sequel
             [
             "ALTER TABLE #{quote_schema_table(table)} ADD #{column_definition_sql(op.merge(:auto_increment=>false, :primary_key=>false, :default=>0, :null=>false))}",
             "ALTER TABLE #{quote_schema_table(table)} ALTER COLUMN #{literal(op[:name])} DROP DEFAULT",
-            "ALTER TABLE #{quote_schema_table(table)} ALTER COLUMN #{literal(op[:name])} SET #{auto_increment_sql}"
+            "ALTER TABLE #{quote_schema_table(table)} ALTER COLUMN #{literal(op[:name])} SET #{AUTOINCREMENT}"
             ]
           else
             "ALTER TABLE #{quote_schema_table(table)} ADD #{column_definition_sql(op)}"
@@ -163,12 +155,16 @@ module Sequel
 
       # DB2 uses an identity column for autoincrement.
       def auto_increment_sql
-        'GENERATED ALWAYS AS IDENTITY'
+        AUTOINCREMENT
       end
 
-      # DB2 does not allow adding primary key constraints to NULLable columns.
-      def can_add_primary_key_constraint_on_nullable_columns?
-        false
+      # Add null/not null SQL fragment to column creation SQL.
+      def column_definition_null_sql(sql, column)
+        null = column.fetch(:null, column[:allow_null]) 
+        null = false  if column[:primary_key]
+
+        sql << NOT_NULL if null == false
+        sql << NULL if null == true
       end
 
       # Supply columns with NOT NULL if they are part of a composite
@@ -238,7 +234,7 @@ module Sequel
 
       # Treat clob as blob if use_clob_as_blob is true
       def schema_column_type(db_type)
-        (use_clob_as_blob && db_type.downcase == 'clob') ? :blob : super
+        (::Sequel::DB2::use_clob_as_blob && db_type.downcase == 'clob') ? :blob : super
       end
 
       # SQL to set the transaction isolation level
@@ -251,7 +247,7 @@ module Sequel
       # use this for blob value:
       #     cast(X'fffefdfcfbfa' as blob(2G))
       def type_literal_generic_file(column)
-        use_clob_as_blob ? :clob : :blob
+        ::Sequel::DB2::use_clob_as_blob ? :clob : :blob
       end
 
       # DB2 uses smallint to store booleans.
@@ -274,14 +270,28 @@ module Sequel
     module DatasetMethods
       include EmulateOffsetWithRowNumber
 
-      BITWISE_METHOD_MAP = {:& =>:BITAND, :| => :BITOR, :^ => :BITXOR, :'B~'=>:BITNOT}.freeze
+      PAREN_CLOSE = Dataset::PAREN_CLOSE
+      PAREN_OPEN = Dataset::PAREN_OPEN
+      BITWISE_METHOD_MAP = {:& =>:BITAND, :| => :BITOR, :^ => :BITXOR, :'B~'=>:BITNOT}
+      EMULATED_FUNCTION_MAP = {:char_length=>'length'.freeze}
+      BOOL_TRUE = '1'.freeze
+      BOOL_FALSE = '0'.freeze
+      CAST_STRING_OPEN = "RTRIM(CHAR(".freeze
+      CAST_STRING_CLOSE = "))".freeze
+      FETCH_FIRST_ROW_ONLY = " FETCH FIRST ROW ONLY".freeze
+      FETCH_FIRST = " FETCH FIRST ".freeze
+      ROWS_ONLY = " ROWS ONLY".freeze
+      EMPTY_FROM_TABLE = ' FROM "SYSIBM"."SYSDUMMY1"'.freeze
+      HSTAR = "H*".freeze
+      BLOB_OPEN = "BLOB(X'".freeze
+      BLOB_CLOSE = "')".freeze
 
       # DB2 casts strings using RTRIM and CHAR instead of VARCHAR.
       def cast_sql_append(sql, expr, type)
         if(type == String)
-          sql << "RTRIM(CHAR("
+          sql << CAST_STRING_OPEN
           literal_append(sql, expr)
-          sql << "))"
+          sql << CAST_STRING_CLOSE
         else
           super
         end
@@ -294,17 +304,13 @@ module Sequel
         when :'B~'
           literal_append(sql, SQL::Function.new(:BITNOT, *args))
         when :extract
-          sql << args[0].to_s
-          sql << '('
-          literal_append(sql, args[1])
-          sql << ')'
+          sql << args.at(0).to_s
+          sql << PAREN_OPEN
+          literal_append(sql, args.at(1))
+          sql << PAREN_CLOSE
         else
           super
         end
-      end
-
-      def quote_identifiers?
-        @opts.fetch(:quote_identifiers, false)
       end
 
       def supports_cte?(type=:select)
@@ -346,6 +352,11 @@ module Sequel
         false
       end
 
+      # DB2 does not support fractional seconds in timestamps.
+      def supports_timestamp_usecs?
+        false
+      end
+
       # DB2 supports window functions
       def supports_window_functions?
         true
@@ -359,14 +370,7 @@ module Sequel
       private
 
       def empty_from_sql
-        ' FROM "SYSIBM"."SYSDUMMY1"'
-      end
-
-      # Emulate offset with row number by default, and also when the limit_offset
-      # strategy is used without a limit, as DB2 doesn't support that syntax with
-      # no limit.
-      def emulate_offset_with_row_number?
-        super && (db.offset_strategy == :emulate || (db.offset_strategy == :limit_offset && !@opts[:limit]))
+        EMPTY_FROM_TABLE
       end
 
       # DB2 needs the standard workaround to insert all default values into
@@ -377,25 +381,20 @@ module Sequel
 
       # Use 0 for false on DB2
       def literal_false
-        '0'
-      end
-
-      # DB2 doesn't support fractional seconds in times, only fractional seconds in timestamps.
-      def literal_sqltime(v)
-        v.strftime("'%H:%M:%S'")
+        BOOL_FALSE
       end
 
       # Use 1 for true on DB2
       def literal_true
-        '1'
+        BOOL_TRUE
       end
 
       # DB2 uses a literal hexidecimal number for blob strings
       def literal_blob_append(sql, v)
-        if db.use_clob_as_blob
+        if ::Sequel::DB2.use_clob_as_blob
           super
         else
-          sql << "BLOB(X'" << v.unpack("H*").first << "')"
+          sql << BLOB_OPEN << v.unpack(HSTAR).first << BLOB_CLOSE
         end
       end
 
@@ -404,40 +403,29 @@ module Sequel
         :union
       end
 
-      # Emulate the char_length function with length
-      def native_function_name(emulated_function)
-        if emulated_function == :char_length
-          'length'
-        else
-          super
-        end
-      end
-
       # DB2 does not require that ROW_NUMBER be ordered.
       def require_offset_order?
         false
       end
 
-      # Modify the sql to limit the number of rows returned.
-      # Uses :offset_strategy Database option to determine how to format the
-      # limit and offset.
+      # Modify the sql to limit the number of rows returned
+      # Note: 
+      #
+      #     After db2 v9.7, MySQL flavored "LIMIT X OFFSET Y" can be enabled using
+      #
+      #     db2set DB2_COMPATIBILITY_VECTOR=MYSQL
+      #     db2stop
+      #     db2start
+      #
+      #     Support for this feature is not used in this adapter however.
       def select_limit_sql(sql)
-        strategy = db.offset_strategy
-        return super if strategy == :limit_offset
-
-        if strategy == :offset_fetch && (o = @opts[:offset]) 
-          sql << " OFFSET "
-          literal_append(sql, o)
-          sql << " ROWS"
-        end
-
         if l = @opts[:limit]
           if l == 1
-            sql << " FETCH FIRST ROW ONLY"
+            sql << FETCH_FIRST_ROW_ONLY
           else
-            sql << " FETCH FIRST "
+            sql << FETCH_FIRST
             literal_append(sql, l)
-            sql << " ROWS ONLY"
+            sql << ROWS_ONLY
           end
         end
       end

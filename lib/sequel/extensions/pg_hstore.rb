@@ -30,7 +30,7 @@
 # Since the hstore type only supports strings, non string keys and
 # values are converted to strings
 #
-#   Sequel.hstore(foo: 1).to_hash # {'foo'=>'1'}
+#   Sequel.hstore(:foo=>1).to_hash # {'foo'=>'1'}
 #   v = Sequel.hstore({})
 #   v[:foo] = 1
 #   v # {'foo'=>'1'}
@@ -49,18 +49,18 @@
 #
 # * \[\]
 # * \[\]=
-# * assoc
+# * assoc (ruby 1.9 only)
 # * delete
 # * fetch
 # * has_key?
 # * has_value?
 # * include?
-# * key
+# * key (ruby 1.9 only)
 # * key?
 # * member?
 # * merge
 # * merge!
-# * rassoc
+# * rassoc (ruby 1.9 only)
 # * replace
 # * store
 # * update
@@ -68,9 +68,12 @@
 #
 # If you want to insert a hash into an hstore database column:
 #
-#   DB[:table].insert(column: Sequel.hstore('foo'=>'bar'))
+#   DB[:table].insert(:column=>Sequel.hstore('foo'=>'bar'))
 #
-# To use this extension, first load it into your Sequel::Database instance:
+# If you would like to use hstore columns in your model objects, you
+# probably want to modify the schema parsing/typecasting so that it
+# recognizes and correctly handles the hstore columns, which you can
+# do by:
 #
 #   DB.extension :pg_hstore
 #
@@ -91,6 +94,14 @@ module Sequel
 
       # Parser for PostgreSQL hstore output format.
       class Parser < StringScanner
+        QUOTE_RE = /"/.freeze
+        KV_SEP_RE = /"\s*=>\s*/.freeze
+        NULL_RE = /NULL/.freeze
+        SEP_RE = /,\s*/.freeze
+        QUOTED_RE = /(\\"|[^"])*/.freeze
+        REPLACE_RE = /\\(.)/.freeze
+        REPLACE_WITH = '\1'.freeze
+
         # Parse the output format that PostgreSQL uses for hstore
         # columns.  Note that this does not attempt to parse all
         # input formats that PostgreSQL will accept.  For instance,
@@ -103,17 +114,17 @@ module Sequel
           return @result if @result
           hash = {}
           while !eos?
-            skip(/"/)
+            skip(QUOTE_RE)
             k = parse_quoted
-            skip(/"\s*=>\s*/)
-            if skip(/"/)
+            skip(KV_SEP_RE)
+            if skip(QUOTE_RE)
               v = parse_quoted
-              skip(/"/)
+              skip(QUOTE_RE)
             else
-              scan(/NULL/)
+              scan(NULL_RE)
               v = nil
             end
-            skip(/,\s*/)
+            skip(SEP_RE)
             hash[k] = v
           end
           @result = hash
@@ -123,14 +134,14 @@ module Sequel
 
         # Parse and unescape a quoted key/value.
         def parse_quoted
-          scan(/(\\"|[^"])*/).gsub(/\\(.)/, '\1')
+          scan(QUOTED_RE).gsub(REPLACE_RE, REPLACE_WITH)
         end
       end
 
       module DatabaseMethods
         def self.extended(db)
-          db.instance_exec do
-            add_named_conversion_proc(:hstore, &HStore.method(:parse))
+          db.instance_eval do
+            add_named_conversion_proc(:hstore)
             @schema_type_classes[:hstore] = HStore
           end
         end
@@ -152,16 +163,6 @@ module Sequel
         # Recognize the hstore database type.
         def schema_column_type(db_type)
           db_type == 'hstore' ? :hstore : super
-        end
-
-        # Set the :callable_default value if the default value is recognized as an empty hstore.
-        def schema_post_process(_)
-          super.each do |a|
-            h = a[1]
-            if h[:type] == :hstore && h[:default] =~ /\A''::hstore\z/
-              h[:callable_default] = lambda{HStore.new({})}
-            end
-          end
         end
 
         # Typecast value correctly to HStore.  If already an
@@ -186,12 +187,22 @@ module Sequel
       # keys to strings during lookup.
       DEFAULT_PROC = lambda{|h, k| h[k.to_s] unless k.is_a?(String)}
 
-      # Undef marshal_{dump,load} methods in the delegate class,
-      # so that ruby uses the old style _dump/_load methods defined
-      # in the delegate class, instead of the marshal_{dump,load} methods
-      # in the Hash class.
-      undef_method :marshal_load
-      undef_method :marshal_dump
+      QUOTE = '"'.freeze
+      COMMA = ",".freeze
+      KV_SEP = "=>".freeze
+      NULL = "NULL".freeze
+      ESCAPE_RE = /("|\\)/.freeze
+      ESCAPE_REPLACE = '\\\\\1'.freeze
+      HSTORE_CAST = '::hstore'.freeze
+
+      if RUBY_VERSION >= '1.9'
+        # Undef 1.9 marshal_{dump,load} methods in the delegate class,
+        # so that ruby 1.9 uses the old style _dump/_load methods defined
+        # in the delegate class, instead of the marshal_{dump,load} methods
+        # in the Hash class.
+        undef_method :marshal_load
+        undef_method :marshal_dump
+      end
 
       # Use custom marshal loading, since underlying hash uses a default proc.
       def self._load(args)
@@ -205,12 +216,12 @@ module Sequel
       end
 
       # Override methods that accept key argument to convert to string.
-      %w'[] delete has_key? include? key? member? assoc'.each do |m|
+      (%w'[] delete has_key? include? key? member?' + Array((%w'assoc' if RUBY_VERSION >= '1.9.0'))).each do |m|
         class_eval("def #{m}(k) super(k.to_s) end", __FILE__, __LINE__)
       end
 
       # Override methods that accept value argument to convert to string unless nil.
-      %w'has_value? value? key rassoc'.each do |m|
+      (%w'has_value? value?' + Array((%w'key rassoc' if RUBY_VERSION >= '1.9.0'))).each do |m|
         class_eval("def #{m}(v) super(convert_value(v)) end", __FILE__, __LINE__)
       end
 
@@ -247,7 +258,7 @@ module Sequel
       # Append a literalize version of the hstore to the sql.
       def sql_literal_append(ds, sql)
         ds.literal_append(sql, unquoted_literal)
-        sql << '::hstore'
+        sql << HSTORE_CAST
       end
 
       # Return a string containing the unquoted, unstring-escaped
@@ -256,10 +267,10 @@ module Sequel
       def unquoted_literal
         str = String.new
         comma = false
-        commas = ","
-        quote = '"'
-        kv_sep = "=>"
-        null = "NULL"
+        commas = COMMA
+        quote = QUOTE
+        kv_sep = KV_SEP
+        null = NULL
         each do |k, v|
           str << commas if comma
           str << quote << escape_value(k) << quote
@@ -292,9 +303,13 @@ module Sequel
       # Escape key/value strings when literalizing to
       # correctly handle backslash and quote characters.
       def escape_value(k)
-        k.to_s.gsub(/("|\\)/, '\\\\\1')
+        k.to_s.gsub(ESCAPE_RE, ESCAPE_REPLACE)
       end
     end
+
+    PG_NAMED_TYPES = {} unless defined?(PG_NAMED_TYPES)
+    # Associate the named types by default.
+    PG_NAMED_TYPES[:hstore] = HStore.method(:parse)
   end
 
   module SQL::Builders

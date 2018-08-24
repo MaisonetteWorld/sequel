@@ -2,9 +2,9 @@
 
 module Sequel
   module Plugins
-    # The skip_create_refresh plugin skips the
+    # SkipCreateRefresh is a simple plugin that make Sequel not
     # refresh after saving a new model object.  Sequel does the
-    # refresh by default to make sure all columns are populated, which is
+    # refresh to make sure all columns are populated, which is
     # necessary so that database defaults work correctly.
     #
     # This plugin is mostly for performance reasons where you
@@ -12,7 +12,7 @@ module Sequel
     # but it could also help cases where records are not
     # immediately available for selection after insertion.
     #
-    # Note that Sequel by default does not attempt to refresh records when
+    # Note that Sequel does not attempt to refresh records when
     # updating existing model objects, only when inserting new
     # model objects.
     # 

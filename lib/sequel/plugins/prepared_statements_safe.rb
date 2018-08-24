@@ -28,7 +28,7 @@ module Sequel
       end
 
       module ClassMethods
-        # A hash with column symbol keys and default values.  Instance
+        # A hash with column symbol keys and default values.  Instance's
         # values are merged into this hash before creating to reduce the
         # number of free columns (columns that may or may not be present
         # in the INSERT statement), as the number of prepared statements
@@ -37,13 +37,6 @@ module Sequel
         
         Plugins.inherited_instance_variables(self, :@prepared_statements_column_defaults=>:dup)
         Plugins.after_set_dataset(self, :set_prepared_statements_column_defaults)
-
-        # Freeze the prepared statements column defaults when freezing the model class.
-        def freeze
-          @prepared_statements_column_defaults.freeze if @prepared_statements_column_defaults
-
-          super
-        end
 
         private
 
@@ -54,8 +47,7 @@ module Sequel
           if db_schema
             h = {}
             db_schema.each do |k, v|
-              default = v[:ruby_default]
-              h[k] = default if (default || !v[:default]) && !v[:primary_key] && !default.is_a?(Sequel::SQL::Expression)
+              h[k] = v[:ruby_default] if (v[:ruby_default] || !v[:default]) && !v[:primary_key]
             end
             @prepared_statements_column_defaults = h
           end

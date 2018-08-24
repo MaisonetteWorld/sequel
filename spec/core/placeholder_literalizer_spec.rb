@@ -1,4 +1,4 @@
-require_relative "spec_helper"
+require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
 
 describe "Dataset::PlaceholderLiteralizer" do
   before do
@@ -52,14 +52,9 @@ describe "Dataset::PlaceholderLiteralizer" do
   it "should handle calls with a placeholders used as filter arguments" do
     loader = @c.loader(@ds){|pl, ds| ds.where(pl.arg)}
     loader.first(:id=>1).must_equal @h
-    loader.first(Sequel.expr{a(b)}).must_equal @h
-    @db.sqls.must_equal ["SELECT * FROM items WHERE (id = 1)", "SELECT * FROM items WHERE a(b)"]
-  end
-  
-  it "should handle calls with a literal strings used as filter arguments" do
-    loader = @c.loader(@ds){|pl, ds| ds.where(pl.arg)}
-    loader.first(Sequel.lit("a = 1")).must_equal @h
-    @db.sqls.must_equal ["SELECT * FROM items WHERE (a = 1)"]
+    loader.first(proc{a(b)}).must_equal @h
+    loader.first("a = 1").must_equal @h
+    @db.sqls.must_equal ["SELECT * FROM items WHERE (id = 1)", "SELECT * FROM items WHERE a(b)", "SELECT * FROM items WHERE (a = 1)"]
   end
   
   it "should handle calls with a placeholders used as right hand side of condition specifiers" do
@@ -78,10 +73,10 @@ describe "Dataset::PlaceholderLiteralizer" do
   end
   
   it "should handle calls with a placeholder used multiple times in different capacities" do
-    loader = @c.loader(@ds){|pl, ds| a = pl.arg; ds.select(a).where(:b=>a)}
-    loader.first("a").must_equal @h
+    loader = @c.loader(@ds){|pl, ds| a = pl.arg; ds.where(a).where(:b=>a)}
+    loader.first("a = 1").must_equal @h
     loader.first(["a = ?", 2]).must_equal @h
-    @db.sqls.must_equal ["SELECT 'a' FROM items WHERE (b = 'a')", "SELECT ('a = ?', 2) FROM items WHERE (b IN ('a = ?', 2))"]
+    @db.sqls.must_equal ["SELECT * FROM items WHERE ((a = 1) AND (b = 'a = 1'))", "SELECT * FROM items WHERE ((a = 2) AND (b IN ('a = ?', 2)))"]
   end
   
   it "should handle calls with manually specified argument positions" do
@@ -92,7 +87,7 @@ describe "Dataset::PlaceholderLiteralizer" do
   end
   
   it "should handle dataset with row procs" do
-    @ds = @ds.with_row_proc(proc{|r| {:foo=>r[:id]+1}})
+    @ds.row_proc = proc{|r| {:foo=>r[:id]+1}}
     loader = @c.loader(@ds){|pl, ds| ds.where(:a=>pl.arg)}
     loader.first(1).must_equal(:foo=>2)
     @db.sqls.must_equal ["SELECT * FROM items WHERE (a = 1)"]
@@ -129,7 +124,9 @@ describe "Dataset::PlaceholderLiteralizer" do
   it "should support modifying dataset used on per-call basis with #run" do
     loader = @c.loader(@ds){|pl, ds| ds.where(:a=>pl.arg)}
     loader.with_dataset do |ds|
-      ds.with_row_proc(lambda{|row| [row]})
+      ds = ds.clone
+      ds.row_proc = lambda{|row| [row]}
+      ds
     end.all(1).must_equal [[@h]]
     @db.sqls.must_equal ["SELECT * FROM items WHERE (a = 1)"]
   end

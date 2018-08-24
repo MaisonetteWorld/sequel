@@ -1,8 +1,9 @@
 # frozen-string-literal: true
 
+if RUBY_VERSION >= '1.9.0'
 module Sequel
   module Plugins
-    # The force_encoding plugin allows you force specific encodings for all
+    # The ForceEncoding plugin allows you force specific encodings for all
     # strings that are used by the model.  When model instances are loaded
     # from the database, all values in the hash that are strings are
     # forced to the given encoding.  Whenever you update a model column
@@ -13,11 +14,11 @@ module Sequel
     #
     # Usage:
     #
-    #   # Force all strings to be UTF-8 encoded in a all model subclasses
+    #   # Force all strings to be UTF8 encoded in a all model subclasses
     #   # (called before loading subclasses)
     #   Sequel::Model.plugin :force_encoding, 'UTF-8'
     #
-    #   # Force the encoding for the Album model to UTF-8
+    #   # Force the encoding for the Album model to UTF8
     #   Album.plugin :force_encoding
     #   Album.forced_encoding = 'UTF-8'
     module ForceEncoding
@@ -57,16 +58,15 @@ module Sequel
         
         # Force the encoding for all string values in the given row hash.
         def force_hash_encoding(row)
-          if fe = model.forced_encoding
-            row.each_value{|v| v.force_encoding(fe) if v.is_a?(String) && !v.is_a?(Sequel::SQL::Blob)}
-          end
+          fe = model.forced_encoding
+          row.values.each{|v| v.force_encoding(fe) if v.is_a?(String)} if fe
           row
         end
         
         # Force the encoding of all returned strings to the model's forced_encoding.
         def typecast_value(column, value)
           s = super
-          if s.is_a?(String) && !s.is_a?(Sequel::SQL::Blob) && (fe = model.forced_encoding)
+          if s.is_a?(String) && (fe = model.forced_encoding)
             s = s.dup if s.frozen?
             s.force_encoding(fe)
           end
@@ -75,4 +75,9 @@ module Sequel
       end
     end
   end
+end
+else
+# :nocov:
+  raise LoadError, 'ForceEncoding plugin only works on Ruby 1.9+'
+# :nocov:
 end

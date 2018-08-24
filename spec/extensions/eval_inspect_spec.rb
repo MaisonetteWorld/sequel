@@ -1,13 +1,12 @@
-require_relative "spec_helper"
+require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
 
 Sequel.extension :eval_inspect
 
 describe "eval_inspect extension" do
   before do
-    @ds = Sequel.mock.dataset.with_extend do
-      def supports_window_functions?; true end
-      def literal_blob_append(sql, s) sql << "X'#{s}'" end
-    end
+    @ds = Sequel.mock.dataset
+    @ds.meta_def(:supports_window_functions?){true}
+    @ds.meta_def(:literal_blob_append){|sql, s| sql << "X'#{s}'"}
   end
 
   it "should make eval(obj.inspect) == obj for all Sequel::SQL::Expression subclasses" do
@@ -62,20 +61,13 @@ describe "eval_inspect extension" do
       Sequel::SQL::AliasedExpression.new(Time.local(2011, 9, 11, 10, 20, 30, 500000.125), :a),
       Sequel::SQL::AliasedExpression.new(Time.utc(2011, 9, 11, 10, 20, 30), :a),
       Sequel::SQL::AliasedExpression.new(Time.utc(2011, 9, 11, 10, 20, 30, 500000.125), :a),
-      Sequel::SQL::AliasedExpression.new(BigDecimal('1.000000000000000000000000000000000000000000000001'), :a),
+      Sequel::SQL::AliasedExpression.new(BigDecimal.new('1.000000000000000000000000000000000000000000000001'), :a),
       Sequel::SQL::AliasedExpression.new(Sequel::CURRENT_DATE, :a),
       Sequel::SQL::AliasedExpression.new(Sequel::CURRENT_TIMESTAMP, :a),
     ].each do |o|
       v = eval(o.inspect)
       v.must_equal o
       @ds.literal(v).must_equal @ds.literal(o)
-
-      ds = @ds
-      @ds.db.create_table(:test) do
-        v = eval(o.inspect)
-        v.must_equal o
-        ds.literal(v).must_equal ds.literal(o)
-      end
     end
   end
 end

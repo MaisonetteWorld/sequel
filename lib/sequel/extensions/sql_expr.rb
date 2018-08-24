@@ -14,10 +14,9 @@
 #
 #   Sequel.extension :sql_expr
 
-#
 class Object
   # Return the object wrapper in an appropriate Sequel expression object.
   def sql_expr
-    Sequel[self]
+    Sequel.expr(self)
   end
 end

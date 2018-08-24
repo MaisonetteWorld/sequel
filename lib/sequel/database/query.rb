@@ -7,8 +7,10 @@ module Sequel
     # This methods generally execute SQL code on the database server.
     # ---------------------
 
-    COLUMN_SCHEMA_DATETIME_TYPES = [:date, :datetime].freeze
-    COLUMN_SCHEMA_STRING_TYPES = [:string, :blob, :date, :datetime, :time, :enum, :set, :interval].freeze
+    STRING_DEFAULT_RE = /\A'(.*)'\z/
+    CURRENT_TIMESTAMP_RE = /now|today|CURRENT|getdate|\ADate\(\)\z/io
+    COLUMN_SCHEMA_DATETIME_TYPES = [:date, :datetime]
+    COLUMN_SCHEMA_STRING_TYPES = [:string, :blob, :date, :datetime, :time, :enum, :set, :interval]
 
     # The prepared statement object hash for this database, keyed by name symbol
     attr_reader :prepared_statements
@@ -30,9 +32,9 @@ module Sequel
     # Call the prepared statement with the given name with the given hash
     # of arguments.
     #
-    #   DB[:items].where(id: 1).prepare(:first, :sa)
+    #   DB[:items].filter(:id=>1).prepare(:first, :sa)
     #   DB.call(:sa) # SELECT * FROM items WHERE id = 1
-    def call(ps_name, hash=OPTS, &block)
+    def call(ps_name, hash={}, &block)
       prepared_statement(ps_name).call(hash, &block)
     end
     
@@ -43,7 +45,7 @@ module Sequel
       execute_dui(sql, opts, &block)
     end
 
-    # Method that should be used when issuing a DELETE or UPDATE
+    # Method that should be used when issuing a DELETE, UPDATE, or INSERT
     # statement.  By default, calls execute.
     # This method should not be called directly by user code.
     def execute_dui(sql, opts=OPTS, &block)
@@ -57,11 +59,11 @@ module Sequel
       execute_dui(sql, opts, &block)
     end
 
-    # Returns a single value from the database, see Dataset#get.
+    # Returns a single value from the database, e.g.:
     #
     #   DB.get(1) # SELECT 1
     #   # => 1
-    #   DB.get{server_version.function} # SELECT server_version()
+    #   DB.get{server_version{}} # SELECT server_version()
     def get(*args, &block)
       @default_dataset.get(*args, &block)
     end
@@ -86,7 +88,7 @@ module Sequel
     # :schema :: An explicit schema to use.  It may also be implicitly provided
     #            via the table name.
     #
-    # If schema parsing is supported by the database, the column information hash should contain at least the
+    # If schema parsing is supported by the database, the column information should hash at least contain the
     # following entries:
     #
     # :allow_null :: Whether NULL is an allowed value for the column.
@@ -157,7 +159,7 @@ module Sequel
       end
 
       cols = schema_parse_table(table_name, opts)
-      raise(Error, "schema parsing returned no columns, table #{table_name.inspect} probably doesn't exist") if cols.nil? || cols.empty?
+      raise(Error, 'schema parsing returned no columns, table probably doesn\'t exist') if cols.nil? || cols.empty?
 
       primary_keys = 0
       auto_increment_set = false
@@ -176,8 +178,6 @@ module Sequel
           c[:max_length] = max_length
         end
       end
-      schema_post_process(cols)
-
       Sequel.synchronize{@schemas[quoted_name] = cols} if cache_schema
       cols
     end
@@ -194,7 +194,11 @@ module Sequel
       sch, table_name = schema_and_table(name)
       name = SQL::QualifiedIdentifier.new(sch, table_name) if sch
       ds = from(name)
-      transaction(:savepoint=>:only){_table_exists?(ds)}
+      if in_transaction? && supports_savepoints?
+        transaction(:savepoint=>true){_table_exists?(ds)}
+      else
+        _table_exists?(ds)
+      end
       true
     rescue DatabaseError
       false
@@ -240,7 +244,7 @@ module Sequel
       when :time
         Sequel.string_to_time(default)
       when :decimal
-        BigDecimal(default)
+        BigDecimal.new(default)
       end
     end
    
@@ -248,7 +252,7 @@ module Sequel
     # and return the normalized value.
     def column_schema_normalize_default(default, type)
       if column_schema_default_string_type?(type)
-        return unless m = /\A'(.*)'\z/.match(default)
+        return unless m = STRING_DEFAULT_RE.match(default)
         m[1].gsub("''", "'")
       else
         default
@@ -260,7 +264,7 @@ module Sequel
     def column_schema_to_ruby_default(default, type)
       return default unless default.is_a?(String)
       if COLUMN_SCHEMA_DATETIME_TYPES.include?(type)
-        if /now|today|CURRENT|getdate|\ADate\(\)\z/i.match(default)
+        if CURRENT_TIMESTAMP_RE.match(default)
           if type == :date
             return Sequel::CURRENT_DATE
           else
@@ -287,16 +291,16 @@ module Sequel
       (ds || dataset).method(:input_identifier)
     end
     
-    # Uncached version of metadata_dataset, designed for overriding.
-    def _metadata_dataset
-      dataset
-    end
-
     # Return a dataset that uses the default identifier input and output methods
     # for this database.  Used when parsing metadata so that column symbols are
     # returned as expected.
     def metadata_dataset
-      @metadata_dataset ||= _metadata_dataset
+      @metadata_dataset ||= (
+        ds = dataset;
+        ds.identifier_input_method = identifier_input_method_default;
+        ds.identifier_output_method = identifier_output_method_default;
+        ds
+      )
     end
 
     # Return a Method object for the dataset's output_identifier_method.
@@ -308,10 +312,10 @@ module Sequel
 
     # Remove the cached schema for the given schema name
     def remove_cached_schema(table)
-      cache = @default_dataset.send(:cache)
-      Sequel.synchronize{cache.clear}
-      k = quote_schema_table(table)
-      Sequel.synchronize{@schemas.delete(k)}
+      if @schemas
+        k = quote_schema_table(table)
+        Sequel.synchronize{@schemas.delete(k)}
+      end
     end
     
     # Match the database's column type to a ruby type via a
@@ -339,24 +343,6 @@ module Sequel
         :blob
       when /\Aenum/io
         :enum
-      end
-    end
-
-    # Post process the schema values.  
-    def schema_post_process(cols)
-      if RUBY_VERSION >= '2.5'
-        cols.each do |_, h|
-          db_type = h[:db_type]
-          if db_type.is_a?(String)
-            h[:db_type] = -db_type
-          end
-        end
-      end
-
-      cols.each do |_,c|
-        c.each_value do |val|
-          val.freeze if val.is_a?(String)
-        end
       end
     end
   end

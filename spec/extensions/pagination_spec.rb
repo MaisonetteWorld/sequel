@@ -1,9 +1,10 @@
-require_relative "spec_helper"
+require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
 
 describe "A paginated dataset" do
   before do
-    count = @count = [153]
-    @d = Sequel.mock.dataset.extension(:pagination).with_extend{define_method(:count){count.first}}
+    @d = Sequel.mock.dataset.extension(:pagination)
+    @d.meta_def(:count) {153}
+    
     @paginated = @d.paginate(1, 20)
   end
   
@@ -23,7 +24,7 @@ describe "A paginated dataset" do
     @paginated.page_count.must_equal 8
     @d.paginate(1, 50).page_count.must_equal 4
 
-    @count[0] = 0
+    @d.meta_def(:count) {0}
     @d.paginate(1, 50).page_count.must_equal 1
   end
   
@@ -34,11 +35,11 @@ describe "A paginated dataset" do
   
   it "should return the next page number or nil if we're on the last" do
     @paginated.next_page.must_equal 2
-    @d.paginate(4, 50).next_page.must_be_nil
+    @d.paginate(4, 50).next_page.must_equal nil
   end
   
   it "should return the previous page number or nil if we're on the first" do
-    @paginated.prev_page.must_be_nil
+    @paginated.prev_page.must_equal nil
     @d.paginate(4, 50).prev_page.must_equal 3
   end
   
@@ -66,7 +67,7 @@ describe "A paginated dataset" do
     @d.paginate(5, 30).last_page?.must_equal false
     @d.paginate(6, 30).last_page?.must_equal true
 
-    @count[0] = 0
+    @d.meta_def(:count) {0}
     @d.paginate(1, 30).last_page?.must_equal true
     @d.paginate(2, 30).last_page?.must_equal false
   end
@@ -79,14 +80,15 @@ describe "A paginated dataset" do
 
   it "should work with fixed sql" do
     ds = @d.clone(:sql => 'select * from blah')
-    @count[0] = 150
+    ds.meta_def(:count) {150}
     ds.paginate(2, 50).sql.must_equal 'SELECT * FROM (select * from blah) AS t1 LIMIT 50 OFFSET 50'
   end
 end
 
 describe "Dataset#each_page" do
   before do
-    @d = Sequel.mock[:items].extension(:pagination).with_extend{def count; 153 end}
+    @d = Sequel.mock.dataset.from(:items).extension(:pagination)
+    @d.meta_def(:count) {153}
   end
   
   it "should raise an error if the dataset already has a limit" do

@@ -36,44 +36,33 @@ module Sequel
       end
     end
     private_class_method :prepared_statements_module
-
+    
     # Default implementation of the argument mapper to allow
     # native database support for bind variables and prepared
     # statements (as opposed to the emulated ones used by default).
     module ArgumentMapper
       # The name of the prepared statement, if any.
-      def prepared_statement_name
-        @opts[:prepared_statement_name]
-      end
-
+      attr_accessor :prepared_statement_name
+      
       # The bind arguments to use for running this prepared statement
-      def bind_arguments
-        @opts[:bind_arguments]
-      end
+      attr_accessor :bind_arguments
 
       # Set the bind arguments based on the hash and call super.
-      def call(bind_vars=OPTS, &block)
-        sql = prepared_sql
-        prepared_args.freeze
-        ps = bind(bind_vars)
-        ps.clone(:bind_arguments=>ps.map_to_prepared_args(ps.opts[:bind_vars]), :sql=>sql, :prepared_sql=>sql).run(&block)
+      def call(bind_vars={}, &block)
+        ds = bind(bind_vars)
+        ds.prepared_sql
+        ds.bind_arguments = ds.map_to_prepared_args(ds.opts[:bind_vars])
+        ds.run(&block)
       end
         
       # Override the given *_sql method based on the type, and
       # cache the result of the sql.
       def prepared_sql
-        if sql = @opts[:prepared_sql] || cache_get(:_prepared_sql)
-          return sql
-        end
-        cache_set(:_prepared_sql, super)
-      end
-
-      private
-
-      # Report that prepared statements are not emulated, since
-      # all adapters that use this use native prepared statements.
-      def emulate_prepared_statements?
-        false
+        return @prepared_sql if @prepared_sql
+        @prepared_args ||= []
+        @prepared_sql = super
+        @opts[:sql] = @prepared_sql
+        @prepared_sql
       end
     end
 
@@ -84,37 +73,29 @@ module Sequel
     # into the query, which works on all databases, as it is no different
     # from using the dataset without bind variables.
     module PreparedStatementMethods
+      PLACEHOLDER_RE = /\A\$(.*)\z/
+      
       # Whether to log the full SQL query.  By default, just the prepared statement
       # name is generally logged on adapters that support native prepared statements.
-      def log_sql
-        @opts[:log_sql]
-      end
+      attr_accessor :log_sql
       
       # The type of prepared statement, should be one of :select, :first,
       # :insert, :update, or :delete
-      def prepared_type
-        @opts[:prepared_type]
-      end
+      attr_accessor :prepared_type
       
       # The array/hash of bound variable placeholder names.
-      def prepared_args
-        @opts[:prepared_args]
-      end
+      attr_accessor :prepared_args
       
       # The dataset that created this prepared statement.
-      def orig_dataset
-        @opts[:orig_dataset]
-      end
+      attr_accessor :orig_dataset
       
       # The argument to supply to insert and update, which may use
       # placeholders specified by prepared_args
-      def prepared_modify_values
-        @opts[:prepared_modify_values]
-      end
+      attr_accessor :prepared_modify_values
 
       # Sets the prepared_args to the given hash and runs the
       # prepared statement.
-      def call(bind_vars=OPTS, &block)
+      def call(bind_vars={}, &block)
         bind(bind_vars).run(&block)
       end
 
@@ -131,27 +112,21 @@ module Sequel
         orig_dataset.columns
       end
       
-      # Disallow use of delayed evaluations in prepared statements.
-      def delayed_evaluation_sql_append(sql, delay)
-        raise Error, "delayed evaluations cannot be used in prepared statements" if @opts[:no_delayed_evaluations]
-        super
-      end
-
       # Returns the SQL for the prepared statement, depending on
       # the type of the statement and the prepared_modify_values.
       def prepared_sql
-        case prepared_type
+        case @prepared_type
         when :select, :all, :each
           # Most common scenario, so listed first.
           select_sql
         when :first
           clone(:limit=>1).select_sql
         when :insert_select
-          insert_select_sql(*prepared_modify_values)
-        when :insert, :insert_pk
-          insert_sql(*prepared_modify_values)
+          insert_select_sql(*@prepared_modify_values)
+        when :insert
+          insert_sql(*@prepared_modify_values)
         when :update
-          update_sql(*prepared_modify_values)
+          update_sql(*@prepared_modify_values)
         when :delete
           delete_sql
         else
@@ -163,8 +138,13 @@ module Sequel
       # prepared_args is present.  If so, they are considered placeholders,
       # and they are substituted using prepared_arg.
       def literal_symbol_append(sql, v)
-        if @opts[:bind_vars] && /\A\$(.*)\z/ =~ v
-          literal_append(sql, prepared_arg($1.to_sym))
+        if @opts[:bind_vars] and match = PLACEHOLDER_RE.match(v.to_s)
+          s = match[1].to_sym
+          if prepared_arg?(s)
+            literal_append(sql, prepared_arg(s))
+          else
+            sql << v.to_s
+          end
         else
           super
         end
@@ -179,10 +159,13 @@ module Sequel
       
       protected
       
-      # Run the method based on the type of prepared statement.
+      # Run the method based on the type of prepared statement, with
+      # :select running #all to get all of the rows, and the other
+      # types running the method with the same name as the type.
       def run(&block)
-        case prepared_type
+        case @prepared_type
         when :select, :all
+          # Most common scenario, so listed first
           all(&block)
         when :each
           each(&block)
@@ -191,22 +174,20 @@ module Sequel
         when :first
           first
         when :insert, :update, :delete
-          if opts[:returning] && supports_returning?(prepared_type)
+          if opts[:returning] && supports_returning?(@prepared_type)
             returning_fetch_rows(prepared_sql)
-          elsif prepared_type == :delete
+          elsif @prepared_type == :delete
             delete
           else
-            public_send(prepared_type, *prepared_modify_values)
+            send(@prepared_type, *@prepared_modify_values)
           end
-        when :insert_pk
-          fetch_rows(prepared_sql){|r| return r.values.first}
         when Array
-          case prepared_type[0]
-          when :map, :as_hash, :to_hash, :to_hash_groups
-            public_send(*prepared_type, &block) 
+          case @prepared_type.at(0)
+          when :map, :to_hash, :to_hash_groups
+            send(*@prepared_type, &block) 
           end
         else
-          raise Error, "unsupported prepared statement type used: #{prepared_type.inspect}"
+          all(&block)
         end
       end
       
@@ -217,7 +198,13 @@ module Sequel
         @opts[:bind_vars][k]
       end
 
-      # The symbol cache should always be skipped, since placeholders are symbols.
+      # Whether there is a bound value for the given key.
+      def prepared_arg?(k)
+        @opts[:bind_vars].has_key?(k)
+      end
+
+      # The symbol cache should always be skipped, since placeholders
+      # are symbols.
       def skip_symbol_cache?
         true
       end
@@ -226,12 +213,10 @@ module Sequel
       # support and using the same argument hash so that you can use
       # bind variables/prepared arguments in subselects.
       def subselect_sql_append(sql, ds)
-        subselect_sql_dataset(sql, ds).prepared_sql
-      end
-
-      def subselect_sql_dataset(sql, ds)
-        super.clone(:prepared_args=>prepared_args, :bind_vars=>@opts[:bind_vars]).
-          send(:to_prepared_statement, :select, nil, :extend=>prepared_statement_modules)
+        ps = ds.clone(:append_sql=>sql).prepare(:select)
+        ps = ps.bind(@opts[:bind_vars]) if @opts[:bind_vars]
+        ps.prepared_args = prepared_args
+        ps.prepared_sql
       end
     end
     
@@ -259,62 +244,10 @@ module Sequel
         prepared_args << k
         prepared_arg_placeholder
       end
-    end
-    
-    # Prepared statements emulation support for adapters that don't
-    # support native prepared statements.  Uses a placeholder
-    # literalizer to hold the prepared sql with the ability to
-    # interpolate arguments to prepare the final SQL string.
-    module EmulatePreparedStatementMethods
-      include UnnumberedArgumentMapper
-
-      def run(&block)
-        if @opts[:prepared_sql_frags]
-          sql = literal(Sequel::SQL::PlaceholderLiteralString.new(@opts[:prepared_sql_frags], @opts[:bind_arguments], false))
-          clone(:prepared_sql_frags=>nil, :sql=>sql, :prepared_sql=>sql).run(&block)
-        else
-          super
-        end
-      end
-
-      private
       
-      # Turn emulation of prepared statements back on, since ArgumentMapper
-      # turns it off.
-      def emulate_prepared_statements?
+      # Always assume there is a prepared arg in the argument mapper.
+      def prepared_arg?(k)
         true
-      end
-        
-      def emulated_prepared_statement(type, name, values)
-        prepared_sql, frags = Sequel::Dataset::PlaceholderLiteralizer::Recorder.new.send(:prepared_sql_and_frags, self, prepared_args) do |pl, ds|
-          ds = ds.clone(:recorder=>pl)
-
-          case type
-          when :first
-            ds.limit(1)
-          when :update, :insert, :insert_select, :delete
-            ds.with_sql(:"#{type}_sql", *values)
-          when :insert_pk
-            ds.with_sql(:insert_sql, *values)
-          else
-            ds
-          end
-        end
-
-        prepared_args.freeze
-        clone(:prepared_sql_frags=>frags, :prepared_sql=>prepared_sql, :sql=>prepared_sql)
-      end
-
-      # Associates the argument with name k with the next position in
-      # the output array.
-      def prepared_arg(k)
-        prepared_args << k
-        @opts[:recorder].arg
-      end
-
-      def subselect_sql_dataset(sql, ds)
-        super.clone(:recorder=>@opts[:recorder]).
-          with_extend(EmulatePreparedStatementMethods)
       end
     end
     
@@ -322,63 +255,45 @@ module Sequel
     # already been set for this dataset, they are updated with the contents
     # of bind_vars.
     #
-    #   DB[:table].where(id: :$id).bind(id: 1).call(:first)
+    #   DB[:table].filter(:id=>:$id).bind(:id=>1).call(:first)
     #   # SELECT * FROM table WHERE id = ? LIMIT 1 -- (1)
     #   # => {:id=>1}
-    def bind(bind_vars=OPTS)
-      bind_vars = if bv = @opts[:bind_vars]
-        Hash[bv].merge!(bind_vars).freeze
-      else
-        if bind_vars.frozen?
-          bind_vars
-        else
-          Hash[bind_vars]
-        end
-      end
-
-      clone(:bind_vars=>bind_vars)
+    def bind(bind_vars={})
+      clone(:bind_vars=>@opts[:bind_vars] ? Hash[@opts[:bind_vars]].merge!(bind_vars) : bind_vars)
     end
     
     # For the given type (:select, :first, :insert, :insert_select, :update, or :delete),
     # run the sql with the bind variables specified in the hash.  +values+ is a hash passed to
     # insert or update (if one of those types is used), which may contain placeholders.
     #
-    #   DB[:table].where(id: :$id).call(:first, id: 1)
+    #   DB[:table].filter(:id=>:$id).call(:first, :id=>1)
     #   # SELECT * FROM table WHERE id = ? LIMIT 1 -- (1)
     #   # => {:id=>1}
-    def call(type, bind_variables=OPTS, *values, &block)
-      to_prepared_statement(type, values, :extend=>bound_variable_modules).call(bind_variables, &block)
+    def call(type, bind_variables={}, *values, &block)
+      prepare(type, nil, *values).call(bind_variables, &block)
     end
     
     # Prepare an SQL statement for later execution.  Takes a type similar to #call,
-    # and the +name+ symbol of the prepared statement.
+    # and the +name+ symbol of the prepared statement.  While +name+ defaults to +nil+,
+    # it should always be provided as a symbol for the name of the prepared statement,
+    # as some databases require that prepared statements have names.
     #
     # This returns a clone of the dataset extended with PreparedStatementMethods,
     # which you can +call+ with the hash of bind variables to use.
     # The prepared statement is also stored in
-    # the associated Database, where it can be called by name.
+    # the associated database, where it can be called by name.
     # The following usage is identical:
     #
-    #   ps = DB[:table].where(name: :$name).prepare(:first, :select_by_name)
+    #   ps = DB[:table].filter(:name=>:$name).prepare(:first, :select_by_name)
     #
-    #   ps.call(name: 'Blah')
+    #   ps.call(:name=>'Blah')
     #   # SELECT * FROM table WHERE name = ? -- ('Blah')
     #   # => {:id=>1, :name=>'Blah'}
     #
-    #   DB.call(:select_by_name, name: 'Blah') # Same thing
-    def prepare(type, name, *values)
-      ps = to_prepared_statement(type, values, :name=>name, :extend=>prepared_statement_modules, :no_delayed_evaluations=>true)
-
-      ps = if ps.send(:emulate_prepared_statements?)
-        ps = ps.with_extend(EmulatePreparedStatementMethods)
-        ps.send(:emulated_prepared_statement, type, name, values)
-      else
-        sql = ps.prepared_sql
-        ps.prepared_args.freeze
-        ps.clone(:prepared_sql=>sql, :sql=>sql)
-      end
-
-      db.set_prepared_statement(name, ps)
+    #   DB.call(:select_by_name, :name=>'Blah') # Same thing
+    def prepare(type, name=nil, *values)
+      ps = to_prepared_statement(type, values)
+      db.set_prepared_statement(name, ps) if name
       ps
     end
     
@@ -386,13 +301,13 @@ module Sequel
     
     # Return a cloned copy of the current dataset extended with
     # PreparedStatementMethods, setting the type and modify values.
-    def to_prepared_statement(type, values=nil, opts=OPTS)
-      mods = opts[:extend] || []
-      mods += [PreparedStatementMethods]
-
-      bind.
-        clone(:prepared_statement_name=>opts[:name], :prepared_type=>type, :prepared_modify_values=>values, :orig_dataset=>self, :no_cache_sql=>true, :prepared_args=>@opts[:prepared_args]||[], :no_delayed_evaluations=>opts[:no_delayed_evaluations]).
-        with_extend(*mods)
+    def to_prepared_statement(type, values=nil)
+      ps = bind
+      ps.extend(PreparedStatementMethods)
+      ps.orig_dataset = self
+      ps.prepared_type = type
+      ps.prepared_modify_values = values
+      ps
     end
 
     private
@@ -400,20 +315,6 @@ module Sequel
     # Don't allow preparing prepared statements by default.
     def allow_preparing_prepared_statements?
       false
-    end
-
-    def bound_variable_modules
-      prepared_statement_modules
-    end
-
-    # Whether prepared statements should be emulated.  True by
-    # default so that adapters have to opt in.
-    def emulate_prepared_statements?
-      true
-    end
-
-    def prepared_statement_modules
-      []
     end
 
     # The argument placeholder.  Most databases used unnumbered

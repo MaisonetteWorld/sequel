@@ -1,10 +1,7 @@
-ENV['MT_NO_PLUGINS'] = '1' # Work around stupid autoloading of plugins
 gem 'minitest'
 require 'minitest/autorun'
 require 'minitest/hooks/default'
 require 'minitest/shared_description'
-
-require_relative "deprecation_helper"
 
 def Sequel.guarded?(*checked)
   unless ENV['SEQUEL_NO_PENDING']
@@ -37,7 +34,6 @@ module Minitest::Spec::DSL
   def cspecify(message, *checked, &block)
     if pending = Sequel.guarded?(*checked)
       it(message) do
-        proc{instance_exec(&block)}.must_raise(Exception) if ENV['SEQUEL_CHECK_PENDING']
         skip "Not yet working on #{Array(pending).map{|x| x.is_a?(Proc) ? :proc : x}.join(', ')}"
       end
     else
